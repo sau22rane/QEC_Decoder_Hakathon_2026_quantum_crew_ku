@@ -19,8 +19,8 @@ the time columns for relative cost only.
 - **The largest untouched piece is routing:** 30% of the remaining LER (0.0105 of 0.0349) comes from shots the cheap
   pass was confident about and never re-decoded.
 - **BP guided decimation: no gain** (independently confirms the result in `FINDINGS.md`).
-- **Full-cascade numbers on `data/train`:** the team hand-in is reproduced (0.03445); the walk profiles are pending
-  (see the last section).
+- **Full cascade on `data/train`:** the walk takes the robust profile from 0.03445 to **0.03432** and the wide
+  profile from 0.03436 to **0.03423**; the best profile measured is **0.03420–0.03422**.
 
 ## Files
 
@@ -149,13 +149,29 @@ comparable with `FINDINGS.md`.
 | Profile | LER | X | Z | Δ vs team hand-in |
 |---|---|---|---|---|
 | robust (team hand-in): cheap2 → 0.49 heavy → 0.4 SUPER | 0.03445 | 0.03501 | 0.03389 | — |
+| robust + walk: SUPER gets walk 200 | 0.03432 | 0.03480 | 0.03383 | −0.00014 ± 0.00005 |
+| robust + walk, SUPER at 0.45 | 0.03430 | 0.03478 | 0.03381 | −0.00015 ± 0.00005 |
+| wide (team): cheap → 0.5 heavy → 0.4 SUPER | 0.03436 | 0.03487 | 0.03386 | −0.00009 ± 0.00003 |
+| wide + walk | 0.03423 | 0.03466 | 0.03379 | −0.00022 ± 0.00006 |
+| **wide + walk, SUPER at 0.45** | **0.03422** | 0.03465 | 0.03380 | −0.00023 ± 0.00006 |
+| wide, heavy + walk 50 → 0.45 SUPER + walk | 0.03420 | 0.03463 | 0.03377 | −0.00025 ± 0.00006 |
 
-This reproduces the hand-in's 0.03445 exactly. **The walk profiles were still running when this was committed;**
-their rows are added in a follow-up commit.
+- The first row reproduces the hand-in's 0.03445 exactly.
+- **The walk is worth −0.00013 to −0.00014 in both profiles** (robust 0.03445 → 0.03432, wide 0.03436 → 0.03423),
+  the same size as on the validation set.
+- Walk and wider routing add up: the best profiles are about **−0.00023** below the hand-in.
+- The last three rows are within noise of each other.
+- Cost on the 10-core M4, relative to the hand-in: about 1.6× for robust + walk and about 1.6–1.9× for the wide
+  walk profiles (other jobs were running, so treat these as rough).
+
+**Kaggle context (18:54 CET):** the team's best public score is 0.03434 (12th; local 0.03459 for that file), and
+10th place is 0.03419. `team/make_submission.py` writes the `data/test` predictions for any profile;
+`submission_test_walk.csv` (git-ignored) holds "wide + walk, SUPER at 0.45".
 
 ## Not done
 
-- No Kaggle submission was made and `submission_template/` is unchanged.
+- `submission_template/` is unchanged: a walk profile selected as a final needs `bposd_walk.py` and its profile
+  copied there, because the hand-in must reproduce the selected submission.
 - Timing on the team's Mac and thread scaling for the walk profiles.
 - The walk uses only weight-3 null combinations. Weight-4 combinations (col_a ⊕ col_b = col_c ⊕ col_d) were not
   tried; given the saturation above, they are unlikely to help the uncertain shots.
