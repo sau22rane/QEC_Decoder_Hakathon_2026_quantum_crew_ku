@@ -8,7 +8,10 @@ differences (seeds 2000/2001, 50k shots per basis unless noted).
 
 - **Task:** read the 70 detector bits of each shot of the `[[18,4,4]]` qLDPC memory experiment and predict the 4
   logical observable flips. Predicting all zeros gives LER 0.288.
-- **Current best submitted decoder:** degenerate BP-OSD, written from scratch in numpy + numba.
+- **Current best (evening):** exact maximum-likelihood decoding by a transfer matrix over time layers
+  (`submission_ml/`, `team/decoders/mldfast.py`). **LER 0.03386** on `data/train`, **0.03367 on the Kaggle public
+  board** (ref 58318168). It has converged to the accuracy floor; see "Exact maximum-likelihood decoder" below.
+- **Earlier best submitted decoder:** degenerate BP-OSD, written from scratch in numpy + numba.
   - Layered min-sum BP: 2 iterations, α = 0.45.
   - OSD-CS: 200 single flips and 30 paired flips.
   - Decision: each observable is decided by summing the probability of every candidate error per logical class.
@@ -438,6 +441,71 @@ Candidate costs are exact log-probabilities, so the class sums are already calib
 that keeps the 0.5 crossing cannot change a decision anyway. Only a model that uses extra features (the full
 16-class posterior, number of fired detectors, BP convergence) could still help, which is the NN + BP-OSD features
 idea below.
+
+## Exact maximum-likelihood decoder (19:00–20:00): LER 0.0339 on `data/train`, the accuracy floor
+
+Files: `team/decoders/mldfast.py` (self-contained: stim + numpy + numba), hand-in folder `submission_ml/`,
+experiments in `team/decoders/mld.py` and `team/mld_eval.py`. No BP, no OSD, no search, no training.
+
+**Idea.** Every DEM mechanism touches detectors in at most two adjacent time layers (7, 14, 14, 14, 14, 7
+detectors; checked for all ~2470 mechanisms in both bases), and the three middle layer pairs are identical. So the
+probability of a syndrome D together with a logical class is an exact chain of five tables on 14-bit indices:
+
+    P_chi(D) = sum_{b0..b3} T0[D0, b0] N[b0^D1, b1] N[b1^D2, b2] N[b2^D3, b3] T4[b3^D4, D5]
+
+- chi runs over characters of the 4 observable bits. chi = e_i gives P(D, L_i = 0) − P(D, L_i = 1), so bit i is
+  predicted 1 exactly when P_{e_i}(D) < 0. That is the per-bit optimal decision; only 5 characters are needed.
+- Tables come from Walsh–Hadamard transforms (the XOR of independent mechanisms is a product in the transformed
+  domain): two 2^28 transforms per character. Mechanisms inside a middle layer are split into two independent halves
+  (p = 2q(1 − q)) so the three middle tables are the same table N.
+- Decoding is one left-to-right pass per shot. Before each N, only running-vector entries within a factor delta of
+  the best are expanded (ranked with a one-step lookahead), rows of N are cut to the M largest entries, and row
+  entries below eta × the layer's largest contribution are skipped.
+
+**Results.** Hand-in = the "robust" BP-OSD cascade.
+
+| Set | ML decoder | BP-OSD hand-in | Δ |
+|---|---|---|---|
+| validation 2×50k (seeds 2000/2001) | 0.03392 | 0.03454 | −0.00062 ± 0.00012 |
+| `data/train` 2×100k, `run_local.py` | **0.03389** (X 0.03430, Z 0.03348) | 0.03445 | −0.00056 |
+
+**Convergence** (2×200k validation shots, M = 4096, paired against R; times on a 10-core Apple M4):
+
+| delta / kmax / eta | LER | Δ vs R | Time per 200k |
+|---|---|---|---|
+| R: 1e-5 / 256 / 1e-8 | 0.03364 | — | 29.5 s |
+| 1e-6 / 512 / 1e-9 (profile `max`) | 0.03363 | −0.000005 ± 0.000010 | 110 s |
+| 1e-5 / 256 / 1e-7 | 0.03364 | +0.000003 ± 0.000008 | 23.2 s |
+| 1e-4 / 128 / 1e-7 | 0.03365 | +0.000016 ± 0.000016 | 19.0 s |
+| 1e-4 / 128 / 1e-6 (profile `fast`) | 0.03367 | +0.000029 ± 0.000020 | 9.9 s (6.6 s in `run_local`) |
+| 1e-3 / 64 / 1e-6 | 0.03380 | +0.00016 ± 0.00003 | 10.2 s |
+| 1e-3 / 128 / 1e-5 | 0.03384 | +0.00020 ± 0.00004 | 6.6 s |
+
+- The decoder has converged: loosening every limit by 10× changes nothing measurable. This is the maximum-likelihood
+  floor; a lower score on a given set can only come from sampling noise (about ±0.0003 on 200k shots).
+- `fast` costs about +0.00003 LER and runs in 6.6 s on a 10-core M4, against 14.5 s on an 18-core M5 Pro for the
+  BP-OSD hand-in.
+- Profile `max` on `data/train`: **0.03386** (X 0.03429, Z 0.03343), 104 s on the M4.
+- Row truncation (M = 4096) costs nothing: re-decoding the 16k ambiguous shots of 2×100k with the full, untruncated
+  table changed 162 of 800,000 bits and the LER by +0.00003 (noise).
+- Test-set files (not submitted): `submission_test_ml_max.csv`, `submission_test_ml_fast.csv`; they differ in 483
+  of 800,000 bits. The hand-in must use the same `MLD_PROFILE` as the selected submission.
+- **Kaggle:** `submission_test_ml_max.csv` submitted at 19:34 CET as ref 58318168, **public score 0.03367**
+  (previous team best 0.03408, the coset-walk cascade). It still has to be selected as a final submission on the
+  Kaggle page, and the hand-in is then `submission_ml/` with `MLD_PROFILE` unset (= `max`).
+- **Open decision:** `max` takes 105–120 s on the 10-core M4, far over t_cap = 15.4 s unless the timing machine is
+  about 7× faster; `fast` (6.6–12 s on the M4, +0.00003 LER) has a test file but is not submitted.
+- **NN plan dropped:** a power-law fit to `team/nn/train_log.txt` puts a plain MLP at 10–1,000 billion shots per basis
+  to reach 0.0336, against 5–40 billion trainable on one H100/B200 in 3.5 hours. The ML decoder makes it moot.
+- Table build: about 30–160 s per basis at import (untimed), then cached in `submission_ml/mld_cache/`
+  (1.7 GB per basis, git-ignored). Needs about 4 GB of RAM while decoding.
+- No shot lost every path under pruning in 600k shots; if one does, it's re-decoded without beam limits.
+
+```bash
+.venv/bin/python submission_template/run_local.py --decoder submission_ml --problem-set data/train
+MLD_PROFILE=fast .venv/bin/python submission_template/run_local.py --decoder submission_ml --problem-set data/train
+.venv/bin/python team/mld_eval.py --shots 50000 --M 1024 --delta 1e-5 --kmax 256
+```
 
 ## What to try next (ranked)
 

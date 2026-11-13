@@ -19,3 +19,6 @@ submission*.csv
 data/kaggle/
 # NN weights (65 MB, reproducible with team/nn/train_nn.py, not used by the hand-in)
 team/nn/*.pt
+
+# ML decoder tables, rebuilt at import by mldfast.build (hundreds of MB)
+mld_cache/

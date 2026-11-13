@@ -55,7 +55,10 @@ Don't re-run experiments it already answers.
 
 - **Decoder:** `team/decoders/bposd2.py`. `decode_full()` returns the most-likely-error bits, the 16-class posterior
   and the per-bit marginals.
-- **Current hand-in:** `submission_template/decoder.py`, a three-level cascade (cheap → 0.49 heavy → 0.4 SUPER):
+- **Best decoder:** `submission_ml/` (exact maximum-likelihood transfer matrix, `team/decoders/mldfast.py`):
+  LER 0.03386 on `data/train`, Kaggle public 0.03367 (ref 58318168). Profiles `max` (default, ~110 s on a 10-core
+  M4) and `fast` (`MLD_PROFILE=fast`, ~7 s). Run with `run_local.py --decoder submission_ml`.
+- **Previous BP-OSD hand-in:** `submission_template/decoder.py`, a three-level cascade (cheap → 0.49 heavy → 0.4 SUPER):
   LER 0.03459, 13.4 s on an 18-core Mac, with import-time warm-up.
 - **Cheap configuration (LER 0.0371, ~2.4 s on an 18-core Mac):** `schedule=1` (layered), `max_iter=2`,
   `alpha=0.45`, `snaps=(2,)`, `n_single=200`, `n_pair=30`, `degenerate=True`, `shortcut=True`.
