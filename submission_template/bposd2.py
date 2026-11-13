@@ -10,6 +10,7 @@ New options compared with v1:
                 bigger, more diverse candidate set; duplicates are removed with Zobrist hashes before summing
   shortcut      skip OSD when BP converges (the class posterior is then one-hot on BP's solution)
   bp_scale      multiply the BP priors' LLRs by this (OSD costs always use the true priors)
+  temp          temperature of the class sum: each candidate adds exp(-cost / temp) (1.0 = true probabilities)
 
 decode_full() also returns the 16-class posterior per shot, used for confidence-gated hybrids.
 """
@@ -20,7 +21,12 @@ import stim
 from hackathon_2026 import problem_info
 
 DEFAULTS = dict(schedule=1, max_iter=3, alpha=0.45, snaps=(3,), n_single=200, n_pair=30, degenerate=True,
-                shortcut=False, bp_scale=1.0, n_expand=0)
+                shortcut=False, bp_scale=1.0, n_expand=0, temp=1.0)
+
+
+_DEBRUIJN = np.zeros(64, np.int64)
+for _i in range(64):
+    _DEBRUIJN[((1 << _i) * 0x03F79D71B4CB0A89 % (1 << 64)) >> 58] = _i
 
 
 class _Problem:
@@ -137,7 +143,22 @@ def _triples(colbits, order, k0, k1):
 
 
 @nb.njit(cache=True)
-def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols, ncol):
+def _reduce(v0, v1, rank, bvec, piv, bcomb):
+    """Reduce a 128-bit vector by the basis: (residual0, residual1, comb0, comb1)."""
+    k0 = np.uint64(0)
+    k1 = np.uint64(0)
+    for k in range(rank):
+        if _getbit(v0, v1, piv[k]):
+            v0 ^= bvec[k, 0]
+            v1 ^= bvec[k, 1]
+            k0 ^= bcomb[k, 0]
+            k1 ^= bcomb[k, 1]
+    return v0, v1, k0, k1
+
+
+@nb.njit(cache=True)
+def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols, ncol,
+         want_cols):
     """OSD-CS seeded by `order`; appends (cost, obs, hash) of every valid candidate to cc/co/ch from index nc."""
     n = order.shape[0]
     bvec = np.zeros((rank_full, 2), np.uint64)
@@ -180,65 +201,78 @@ def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pa
             n_cand += 1
     npair = min(n_pair, n_cand)
     nsing = min(n_single, n_cand)
+    nsol = max(nsing, npair)
+    # The solve is linear over GF(2): solve(s ^ col_a ^ col_b) = solve(s) ^ solve(col_a) ^ solve(col_b). So reduce the
+    # syndrome and each candidate column ONCE; every OSD-CS candidate is then two 128-bit XORs of these solutions
+    # (comb = which basis columns are used; res = residual, nonzero only if H is rank deficient).
+    sr0, sr1, sc0, sc1 = _reduce(s0, s1, rank, bvec, piv, bcomb)
+    cres = np.empty((max(nsol, 1), 2), np.uint64)
+    ccmb = np.empty((max(nsol, 1), 2), np.uint64)
+    for a in range(nsol):
+        ja = cand[a]
+        r0, r1, k0, k1 = _reduce(colbits[ja, 0], colbits[ja, 1], rank, bvec, piv, bcomb)
+        cres[a, 0], cres[a, 1], ccmb[a, 0], ccmb[a, 1] = r0, r1, k0, k1
     total = 1 + nsing + npair * (npair - 1) // 2
+    a = 0
+    b = 0
     for t in range(total):
-        # t = 0: no flips; 1..nsing: one flip; then pairs (a, b) with a < b < npair
-        x0, x1 = s0, s1
-        extra_cost = 0.0
-        extra_obs = np.uint8(0)
-        extra_hash = np.uint64(0)
-        ja = 0
-        jb = 0
-        if t >= 1 and t <= nsing:
-            ja = cand[t - 1]
-            x0 ^= colbits[ja, 0]
-            x1 ^= colbits[ja, 1]
-            extra_cost = weight[ja]
-            extra_obs = obsmask[ja]
-            extra_hash = zob[ja]
-        elif t > nsing:
-            r = t - nsing - 1
-            a = 0
-            while r >= npair - 1 - a:
-                r -= npair - 1 - a
-                a += 1
-            b = a + 1 + r
-            ja, jb = cand[a], cand[b]
-            x0 ^= colbits[ja, 0] ^ colbits[jb, 0]
-            x1 ^= colbits[ja, 1] ^ colbits[jb, 1]
-            extra_cost = weight[ja] + weight[jb]
-            extra_obs = obsmask[ja] ^ obsmask[jb]
-            extra_hash = zob[ja] ^ zob[jb]
-        c0 = np.uint64(0)
-        c1 = np.uint64(0)
-        for k in range(rank):
-            if _getbit(x0, x1, piv[k]):
-                x0 ^= bvec[k, 0]
-                x1 ^= bvec[k, 1]
-                c0 ^= bcomb[k, 0]
-                c1 ^= bcomb[k, 1]
-        if x0 != 0 or x1 != 0:
-            continue
-        cost = extra_cost
-        obs = extra_obs
-        h = extra_hash
+        # t = 0: no flips; 1..nsing: one flip; then pairs (a, b), a < b < npair, enumerated incrementally
+        r0, r1, c0, c1 = sr0, sr1, sc0, sc1
+        cost = 0.0
+        obs = np.uint8(0)
+        h = np.uint64(0)
         nk = 0
         if t >= 1 and t <= nsing:
-            cols[nc, 0] = cand[t - 1]
+            i = t - 1
+            ja = cand[i]
+            r0 ^= cres[i, 0]
+            r1 ^= cres[i, 1]
+            c0 ^= ccmb[i, 0]
+            c1 ^= ccmb[i, 1]
+            cost = weight[ja]
+            obs = obsmask[ja]
+            h = zob[ja]
+            if want_cols:
+                cols[nc, 0] = ja
             nk = 1
         elif t > nsing:
-            cols[nc, 0] = ja
-            cols[nc, 1] = jb
+            if t == nsing + 1:
+                a, b = 0, 1
+            else:
+                b += 1
+                if b == npair:
+                    a += 1
+                    b = a + 1
+            ja, jb = cand[a], cand[b]
+            r0 ^= cres[a, 0] ^ cres[b, 0]
+            r1 ^= cres[a, 1] ^ cres[b, 1]
+            c0 ^= ccmb[a, 0] ^ ccmb[b, 0]
+            c1 ^= ccmb[a, 1] ^ ccmb[b, 1]
+            cost = weight[ja] + weight[jb]
+            obs = obsmask[ja] ^ obsmask[jb]
+            h = zob[ja] ^ zob[jb]
+            if want_cols:
+                cols[nc, 0] = ja
+                cols[nc, 1] = jb
             nk = 2
-        for k in range(rank):
-            if _getbit(c0, c1, k):
+        if r0 != 0 or r1 != 0:
+            continue
+        # walk only the set bits of comb (de Bruijn trailing-zero count)
+        for word in range(2):
+            x = c0 if word == 0 else c1
+            while x != 0:
+                low = x & (~x + np.uint64(1))
+                k = _DEBRUIJN[(low * np.uint64(0x03F79D71B4CB0A89)) >> np.uint64(58)] + 64 * word
                 j = sel[k]
                 cost += weight[j]
                 obs ^= obsmask[j]
                 h ^= zob[j]
-                cols[nc, nk] = j
+                if want_cols:
+                    cols[nc, nk] = j
                 nk += 1
-        ncol[nc] = nk
+                x ^= low
+        if want_cols:
+            ncol[nc] = nk
         cc[nc] = cost
         co[nc] = obs
         ch[nc] = h
@@ -249,7 +283,7 @@ def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pa
 @nb.njit(cache=True)
 def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob,
           rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand,
-          probs_out):
+          inv_temp, probs_out, stats_out):
     m = chk_ptr.shape[0] - 1
     n = var_ptr.shape[0] - 1
     E = edge_var.shape[0]
@@ -371,13 +405,17 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
         nc = 1
         if shortcut:
             probs_out[obs] = 1.0
+            stats_out[0] = cost
+            stats_out[1] = 1.0
             return obs
     for s in range(nsnap):
         order = np.argsort(snap_post[s])
         nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols,
-                  ncol)
+                  ncol, n_expand > 0)
     if nc == 0:
         probs_out[0] = 1.0
+        stats_out[0] = 1e300
+        stats_out[1] = 0.0
         return np.uint8(0)
     # local search: around the n_expand cheapest candidates, swap in every weight-3 null combination (a, b, c) that
     # touches the error (col_a ^ col_b == col_c, so the syndrome is unchanged; some also flip observables)
@@ -419,22 +457,25 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
         if r > 0 and ch[i] == prev:
             continue
         prev = ch[i]
-        w = np.exp(cmin - cc[i])
+        w = np.exp((cmin - cc[i]) * inv_temp)
         probs_out[co[i]] += w
         total += w
         if cc[i] < cc[best]:
             best = i
     for k in range(16):
         probs_out[k] /= total
+    stats_out[0] = cmin  # cost of the most likely error found
+    stats_out[1] = total  # sum of exp(cmin - cost) over distinct candidates
     return co[best]
 
 
 @nb.njit(parallel=True, cache=True)
 def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob, rank_full,
-         schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand):
+         schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand, inv_temp):
     shots, m = dets.shape
     best = np.zeros(shots, np.uint8)
     probs = np.zeros((shots, 16))
+    stats = np.zeros((shots, 2))
     for i in nb.prange(shots):
         syn = dets[i]
         s0 = np.uint64(0)
@@ -449,29 +490,33 @@ def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg
                     s1 |= np.uint64(1) << np.uint64(c - 64)
         if not nz:
             probs[i, 0] = 1.0
+            stats[i, 1] = 1.0
             continue
         best[i] = _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits,
                         obsmask, zob, rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut,
-                        tri_ptr, tri_other, n_expand, probs[i])
-    return best, probs
+                        tri_ptr, tri_other, n_expand, inv_temp, probs[i], stats[i])
+    return best, probs, stats
 
 
 CLASS_BITS = ((np.arange(16)[:, None] >> np.arange(4)) & 1).astype(np.float64)  # (16, 4)
 
 
-def decode_full(circuit, detector_events, **kw):
-    """Returns (best-error prediction (shots, 4), class posterior (shots, 16), per-bit marginal P(L_j = 1) (shots, 4))."""
+def decode_full(circuit, detector_events, return_stats=False, **kw):
+    """Returns (best-error prediction (shots, 4), class posterior (shots, 16), per-bit marginal P(L_j = 1) (shots, 4)),
+    plus with return_stats=True a (shots, 2) array: [cost of the most likely error found, sum of exp(best - cost)]."""
     o = {**DEFAULTS, **kw}
     P = problem(circuit)
     dets = np.ascontiguousarray(detector_events, dtype=np.uint8)
-    best, probs = _run(dets, P.prior_llr, P.prior_llr * o["bp_scale"], P.edge_var, P.chk_ptr, P.var_edges, P.var_ptr,
+    best, probs, stats = _run(dets, P.prior_llr, P.prior_llr * o["bp_scale"], P.edge_var, P.chk_ptr, P.var_edges, P.var_ptr,
                        P.max_deg, P.colbits, P.obsmask, P.zobrist, P.rank, o["schedule"], o["max_iter"], o["alpha"],
                        np.asarray(sorted(o["snaps"]), np.int64), o["n_single"], o["n_pair"], o["shortcut"],
                        *(P.triples() if o["n_expand"] > 0 else (np.zeros(P.n + 1, np.int32), np.zeros((0, 2), np.int32))),
-                       o["n_expand"])
+                       o["n_expand"], 1.0 / o["temp"])
     best_bits = ((best[:, None] >> np.arange(P.num_obs, dtype=np.uint8)) & 1).astype(np.uint8)
     # plain sums instead of a matmul: macOS Accelerate raises spurious warnings on subnormal probabilities
     marg = np.stack([probs[:, CLASS_BITS[:, j] == 1].sum(1) for j in range(P.num_obs)], axis=1)
+    if return_stats:
+        return best_bits, probs, marg, stats
     return best_bits, probs, marg
 
 

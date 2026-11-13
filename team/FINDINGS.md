@@ -153,6 +153,139 @@ cost. It's best used only inside the heavy pass.
 Score = LER × max(1, t / 3 s)^0.1, using the provisional t_cap. The real speed ratio of the timing machine
 (48 EPYC 9655 cores + B200) to the Mac is unknown.
 
+## Faster OSD-CS via GF(2) linearity, and the new hand-in
+
+The solve is linear: solve(s ⊕ col_a ⊕ col_b) = solve(s) ⊕ solve(col_a) ⊕ solve(col_b). `bposd2._osd` now reduces
+the syndrome and each candidate column once, and builds every OSD-CS candidate from two 128-bit XORs plus a walk
+over the set bits (de Bruijn trailing-zero count). The predictions are **bit-identical** to before. It's 1.2× faster
+for cheap and 1.4–1.5× for heavy. The BP shortcut barely helps heavy (80 → 77 µs/shot), because shots that reach
+OSD rarely have a converged BP.
+
+Clean timing on the full `data/train` (2×100k shots, 18-core Mac, median of 3, nothing else running).
+Score = LER × max(1, t / 3 s)^0.1.
+
+| Decoder | LER | Time | Score if timing machine = Mac | Score if 2× faster |
+|---|---|---|---|---|
+| cheap | 0.03706 | 2.36 s | 0.03706 | 0.03706 |
+| 1 ordering, 800/60 | 0.03599 | 4.08 s | 0.03711 | 0.03599 |
+| 2 orderings, 400/40 | 0.03568 | 5.56 s | 0.03796 | 0.03568 |
+| 3 orderings, 400/40 | 0.03546 | 8.02 s | 0.03912 | 0.03650 |
+| heavy (3 orderings, 800/60) | 0.03494 | 14.20 s | 0.04082 | 0.03808 |
+| cascade τ = 0.3 → heavy | 0.03579 | 4.05 s | 0.03689 | 0.03579 |
+| **cascade τ = 0.4 → heavy (new hand-in)** | **0.03552** | **4.36 s** | **0.03687** | 0.03552 |
+| cascade τ = 0.45 → heavy | 0.03535 | 4.86 s | 0.03710 | 0.03535 |
+| cascade τ = 0.4 → 1500/80 | 0.03539 | 5.32 s | 0.03748 | 0.03539 |
+| cascade τ = 0.45 → 1500/80 | 0.03518 | 5.98 s | 0.03770 | **0.03518** |
+
+The cascade τ = 0.4 → heavy is best or near-best under both speed assumptions, so it's now the hand-in
+(`submission_template/decoder.py`, `TAU = 0.4`). Official `run_local.py`: LER 0.03552, median 3.98 s over 5 runs,
+deterministic.
+
+The transformer (sparse fired-detector tokens, d = 128, 4 layers, bf16 on MPS) trains 2–5× slower than the MLP and
+learned worse per shot. With length-grouped batches it reached 0.105 at 28M shots; with random batches 0.115 at 14M
+(X basis), against the MLP's 0.065 at 12M. We stopped it.
+
+## AutDEC / multiple BPs instead of OSD: not feasible here
+
+- **Automorphisms:**
+  - The code's stabiliser group is invariant under all 9 translations of the L/R 3×3 torus.
+  - The measured check graph (7 X + 7 Z, with 4 redundant checks dropped) has only 2 automorphisms.
+  - An exhaustive search (networkx VF2, detectors coloured by round, mechanisms by prior) finds **only the identity**
+    for the circuit-level DEM in both bases. There are no symmetric copies of the decoding graph for AutDEC to run
+    BP on.
+- **Multiple BPs without OSD** (2×50k shots; unconverged shots predict 0):
+
+| BP alone | Converged | LER on converged shots | Overall LER |
+|---|---|---|---|
+| layered 3 it, α = 0.45 (our setting) | 24% | 0.0005 | 0.247 |
+| layered 30 it, α = 1.0 | 82% | 0.019 | 0.090 |
+| layered 100 it, α = 1.0 (best single) | 86% | 0.024 | 0.079 |
+| flooding 100 it, α = 1.0 | 60% | 0.013 | 0.166 |
+| ensemble of all 24 BP runs (lowest-cost converged solution) | 89% | 0.025 | **0.070** |
+
+- **Conclusion:** BP converges on at most ~89% of shots even with a 24-run ensemble. The remaining 11% are the hard
+  shots and still need OSD. Convergence also doesn't mean correct: converged BP solutions ignore degeneracy, and
+  their LER (0.025) is far worse than BP-OSD on the same shots. Our cascade already does the useful part (a cheap
+  pass with BP shortcut, OSD only where needed).
+
+## Relay-BP (memory-BP legs, Müller et al. 2025): converges, but no useful gain
+
+Implemented in `bposd2` (`relay_*` options, `_relay` kernel):
+- min-sum legs with per-mechanism memory strengths γ (leg 0: γ = 0.125; later legs uniform in [−0.24, 0.66],
+  fixed seed);
+- each leg starts from the previous leg's marginals;
+- every converged leg adds a candidate, and the first `relay_osd` legs' marginals seed extra OSD-CS runs.
+
+| Relay-BP alone (no OSD, 2×10k shots) | Any leg converged | LER | µs/shot |
+|---|---|---|---|
+| 1 leg | 78% | 0.108 | 57 |
+| 10 legs, stop at 1 solution | 99.6% | 0.059 | 97 |
+| 30 legs, stop at 5 solutions | 100% | 0.053 | 159 |
+| 100 legs, S = 5, α = 0.8 | 100% | **0.050** | 275 |
+
+| Inside the heavy pass (2×20k paired shots) | LER | Δ vs heavy | µs/shot |
+|---|---|---|---|
+| heavy (3 BP orderings, 800/60) | 0.03544 | — | 62 |
+| + relay 10 legs, candidates only | 0.03541 | −0.00003 ± 0.00006 | 188 |
+| + relay, 1 relay ordering | 0.03529 | −0.00015 ± 0.00012 | 231 |
+| + relay, 3 relay orderings | 0.03521 | −0.00023 ± 0.00014 | 286 |
+| 1 BP ordering + 3 relay orderings | 0.03589 | +0.00045 | 248 |
+
+- **Memory works for convergence:** ~100% against 89% for a 24-run plain-BP ensemble.
+- **The few solutions it finds are no substitute for degenerate OSD** (0.050 against 0.0355).
+- **Relay candidates add nothing,** and relay orderings are no better than BP snapshot orderings. The best gain,
+  −0.0002 (1.6 SE), costs 4–5× the heavy pass, which is a net loss in the final score. Kept as options, off by
+  default.
+
+## Failure diagnostic: search miss vs ambiguity (`team/diagnose.py`)
+
+Stim's DEM sampler returns each shot's true error. We mapped it to the merged columns (verified H e = D and
+L e = O) and compared its cost with the cost of the most likely error the decoder found. 2×50k fresh shots
+(seeds 4000/4001); this sample gives LER about 0.001 lower than the validation set, consistently across decoders.
+
+| Decoder | LER | Search misses (truth cheaper than best found) | Ambiguity (found something at least as likely) | True class absent | Oracle LER (add the missed truth) |
+|---|---|---|---|---|---|
+| cheap (submitted) | 0.03578 | 12% of bit errors | 88% | 173 of 7427 wrong shots | 0.03206 (−0.0037) |
+| heavy (3 orderings, 800/60) | 0.03389 | 4.3% | 95.7% | 0 | 0.03271 (−0.0012) |
+
+- **The cheap decoder's search misses are worth up to −0.0037.** The heavy pass recovers about 70% of that; only
+  −0.0012 is left even for a perfect search on top of heavy.
+- **Missed true errors are heavy:** about 5.5 merged mechanisms on average. Wrong shots come mostly from true errors
+  of weight 4–7, so exact enumeration up to weight 3–4 (meet in the middle) would mostly re-find errors OSD already
+  finds. It's de-prioritised.
+- **88–96% of the remaining failures are ambiguity:** the decoder found an error at least as likely as the truth,
+  and gives the true class only P ≈ 0.18 on average. A sizeable part of this is irreducible; better summation or
+  calibration can only move the shots near 0.5.
+- **Confidence on wrong bits (heavy decoder):** the probability it gave the true value of each wrongly predicted
+  bit was:
+  - 0–0.05: 19%
+  - 0.05–0.1: 8%
+  - 0.1–0.2: 14%
+  - 0.2–0.3: 13%
+  - 0.3–0.4: **29%**
+  - 0.4–0.5: 17%
+
+  So **46% of wrong bits were near coin-flips (0.3–0.5)**. That's where calibration (a temperature on the costs) or
+  more complete class sums could still flip answers. The ~19% confident-wrong bits are mostly irreducible.
+- **The heavy pass (0.0339 on this sample) is already about at the leader's public score (0.0337).** So the main
+  gain is making heavy-quality search cheap enough to fit the time budget.
+
+## Calibration: no gain (`bposd2` option `temp`)
+
+| Test | Result |
+|---|---|
+| Temperature on the class sum, exp(−cost / T), cheap decoder, 2×50k shots | T = 1.0 is best. T = 0.6–1.25 are within +0.0002; T = 2.0 is +0.0013 |
+| Temperature, heavy decoder, 2×20k shots | T = 0.9: 0.03542, T = 1.0: 0.03544, T = 1.1: 0.03549 (all noise) |
+| Decision threshold (per-bit marginal), cheap / heavy | 0.5 is optimal; 0.45 and 0.55 are +0.0000 to +0.0002; 0.4 and 0.6 are worse |
+
+Reliability curves are close to the diagonal. For example, predicted 0.40–0.50 → observed 0.47–0.48, and
+predicted 0.60–0.70 → observed 0.66–0.67. The decoder is only slightly overconfident near the extremes.
+
+Candidate costs are exact log-probabilities, so the class sums are already calibrated. Any monotone recalibration
+that keeps the 0.5 crossing cannot change a decision anyway. Only a model that uses extra features (the full
+16-class posterior, number of fired detectors, BP convergence) could still help, which is the NN + BP-OSD features
+idea below.
+
 ## What to try next (ranked)
 
 1. **Train the NN much longer, on the GPU.**

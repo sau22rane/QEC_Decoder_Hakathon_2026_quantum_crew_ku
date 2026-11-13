@@ -81,13 +81,11 @@ _NN = {}
 def nn_probs(basis, dets, tag="w1024_d4"):
     """P(L_j = 1 | D) from the trained network team/nn/<basis>_<tag>.pt (torch, CPU or MPS)."""
     import torch
-    from train_nn import ResMLP
+    from train_nn import build_model
     key = (basis, tag)
     if key not in _NN:
-        ck = torch.load(os.path.join(HERE, "nn", f"{basis}_{tag}.pt"), map_location="cpu")
-        m = ResMLP(width=ck["width"], depth=ck["depth"])
-        m.load_state_dict(ck["state_dict"])
-        _NN[key] = m.eval()
+        ck = torch.load(os.path.join(HERE, "nn", f"{basis}_{tag}.pt"), map_location="cpu", weights_only=False)
+        _NN[key] = build_model(ck)
     with torch.no_grad():
         out = []
         x = torch.tensor(np.asarray(dets), dtype=torch.float32)

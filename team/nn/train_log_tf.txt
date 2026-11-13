@@ -1,0 +1,17 @@
+[X] transformer tfs_d128_l4_h4: 0.81M parameters on mps
+[X]    102s  chunk   1      2.0M shots  loss 0.3927  val LER 0.21824
+[X]    199s  chunk   2      4.0M shots  loss 0.3090  val LER 0.16589
+[X]    306s  chunk   3      6.0M shots  loss 0.2774  val LER 0.14414
+[X]    412s  chunk   4      8.0M shots  loss 0.2448  val LER 0.12649
+[X]    514s  chunk   5     10.0M shots  loss 0.2308  val LER 0.11977
+[X]    619s  chunk   6     12.0M shots  loss 0.2275  val LER 0.11596
+[X]    718s  chunk   7     14.0M shots  loss 0.2303  val LER 0.11519
+[X]    722s  chunk   8     14.0M shots  loss 0.2267  val LER 0.11518
+saved /Users/sau22rane/QC/NBI_NVDA_hack/QEC_Decoder_Hakathon_2026/team/nn/X_tfs_d128_l4_h4.pt
+[Z] transformer tfs_d128_l4_h4: 0.81M parameters on mps
+[Z]    105s  chunk   1      2.0M shots  loss 0.3621  val LER 0.19733
+[Z]    207s  chunk   2      4.0M shots  loss 0.2854  val LER 0.14444
+[Z]    308s  chunk   3      6.0M shots  loss 0.2686  val LER 0.16526
+[Z]    406s  chunk   4      8.0M shots  loss 0.2154  val LER 0.10904
+[Z]    502s  chunk   5     10.0M shots  loss 0.2129  val LER 0.10333
+[Z]    598s  chunk   6     12.0M shots  loss 0.2036  val LER 0.10036

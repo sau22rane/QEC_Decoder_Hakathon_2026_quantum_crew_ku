@@ -103,3 +103,15 @@ if args.suite == "nn":
         return f
     T.run("NN, uncertain (tau=0.35) -> avg with HEAVY BP-OSD", gate_heavy(0.35))
     print(f"   BP-OSD used on {np.mean(list(frac.values())):.3f} of shots")
+
+if args.suite == "nnvs":
+    tf = "tfs_d128_l4_h4"
+    print(f"=== MLP (w1024_d4) vs sparse transformer ({tf}), alone and combined with cheap BP-OSD")
+    T = Table(args.shots)
+    T.run("cheap degenerate BP-OSD", cheap)
+    T.run("MLP alone", lambda b, c, d: hy.nn_probs(b, d, "w1024_d4") > 0.5)
+    T.run("transformer alone", lambda b, c, d: hy.nn_probs(b, d, tf) > 0.5)
+    T.run("transformer + MLP average", lambda b, c, d: (hy.nn_probs(b, d, tf) + hy.nn_probs(b, d, "w1024_d4")) / 2 > 0.5)
+    for wt in [0.3, 0.5]:
+        T.run(f"average P: {wt} transformer + {1 - wt:.1f} BP-OSD",
+              lambda b, c, d, wt=wt: (wt * hy.nn_probs(b, d, tf) + (1 - wt) * hy.bposd_marginals(c, d, **hy.CHEAP)) > 0.5)
