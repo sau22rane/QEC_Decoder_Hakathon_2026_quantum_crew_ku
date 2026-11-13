@@ -1,0 +1,81 @@
+[{"stream_name":"stderr","time":7.555994087,"data":"/usr/local/lib/python3.13/dist-packages/nbformat/validator.py:434: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.\n"}
+,{"stream_name":"stderr","time":7.556046406,"data":"  _validate(nbdict, ref, version, version_minor, relax_add_props)\n"}
+,{"stream_name":"stderr","time":8.58216852,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":8.582196592,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":8.582202018,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":8.582206307,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":9.206906317,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":9.206936646,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":9.206941303,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":9.206948961,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stdout","time":10.394438928,"data":"GPU 0: Tesla T4 (UUID: GPU-7b5a2098-4774-6586-b701-954170b26935)\r\n"}
+,{"stream_name":"stdout","time":10.394487191,"data":"GPU 1: Tesla T4 (UUID: GPU-af722912-1941-8287-c940-91fddc3d6c9c)\r\n"}
+,{"stream_name":"stdout","time":10.533584453,"data":"4\r\n"}
+,{"stream_name":"stdout","time":10.533628099,"data":"               total        used        free      shared  buff/cache   available\r\n"}
+,{"stream_name":"stdout","time":10.533634525,"data":"Mem:              31           1          25           0           4          30\r\n"}
+,{"stream_name":"stdout","time":39.290389565,"data":"['.claude', '.gitignore', '.python-version', 'LICENSE', 'README.md', 'data', 'figures', 'notebooks', 'pyproject.toml', 'sample_submission.csv', 'src', 'submission_ml']\n"}
+,{"stream_name":"stdout","time":39.290419505,"data":"/kaggle/working/repo\n"}
+,{"stream_name":"stdout","time":46.725498265,"data":"  Installing build dependencies ... \u001b[?25l\u001b[?25hdone\r\n"}
+,{"stream_name":"stdout","time":46.774960688,"data":"  Checking if build backend supports build_editable ... \u001b[?25l\u001b[?25hdone\r\n"}
+,{"stream_name":"stdout","time":46.876535164,"data":"  Getting requirements to build editable ... \u001b[?25l\u001b[?25hdone\r\n"}
+,{"stream_name":"stdout","time":46.927025608,"data":"  Preparing editable metadata (pyproject.toml) ... \u001b[?25l\u001b[?25hdone\r\n"}
+,{"stream_name":"stdout","time":47.029382094,"data":"  Building editable for hackathon_2026 (pyproject.toml) ... \u001b[?25l\u001b[?25hdone\r\n"}
+,{"stream_name":"stdout","time":56.144432426,"data":"2.11.0+cu130 True 0.61.2 2.1.3\n"}
+,{"stream_name":"stdout","time":223.050152895,"data":"  N=[torch.from_numpy(np.ascontiguousarray(N[k])).to(device) for k in range(5)],\r\n"}
+,{"stream_name":"stdout","time":560.562909008,"data":"loading data/train/train.csv ...\r\n"}
+,{"stream_name":"stdout","time":560.562951542,"data":"data/train X: 99999 shots\r\n"}
+,{"stream_name":"stdout","time":560.562955658,"data":"data/train Z: 99998 shots\r\n"}
+,{"stream_name":"stdout","time":560.562958896,"data":"run 1: 51.53 s\r\n"}
+,{"stream_name":"stdout","time":560.562988816,"data":"run 2: 56.61 s\r\n"}
+,{"stream_name":"stdout","time":560.562993691,"data":"run 3: 56.12 s\r\n"}
+,{"stream_name":"stdout","time":560.562997655,"data":"runtime (median of 3): 56.12 s\r\n"}
+,{"stream_name":"stdout","time":560.563001907,"data":"wrote submission_train_ml_gpu.csv\r\n"}
+,{"stream_name":"stdout","time":560.563005375,"data":"X: LER 0.03430\r\n"}
+,{"stream_name":"stdout","time":560.563008542,"data":"Z: LER 0.03340\r\n"}
+,{"stream_name":"stdout","time":560.5630117,"data":"both: LER 0.03385\r\n"}
+,{"stream_name":"stdout","time":573.840188965,"data":"  N=[torch.from_numpy(np.ascontiguousarray(N[k])).to(device) for k in range(5)],\r\n"}
+,{"stream_name":"stdout","time":637.180745703,"data":"loading data/test/test.csv ...\r\n"}
+,{"stream_name":"stdout","time":637.180778682,"data":"data/test X: 99999 shots\r\n"}
+,{"stream_name":"stdout","time":637.180785781,"data":"data/test Z: 99998 shots\r\n"}
+,{"stream_name":"stdout","time":637.180810349,"data":"run 1: 56.95 s\r\n"}
+,{"stream_name":"stdout","time":637.180815219,"data":"runtime (median of 1): 56.95 s\r\n"}
+,{"stream_name":"stdout","time":637.180819932,"data":"wrote submission_test_ml_gpu.csv\r\n"}
+,{"stream_name":"stdout","time":637.180824344,"data":"no observable flips in data/test, so no LER; use a set with labels such as data/test_set\r\n"}
+,{"stream_name":"stdout","time":637.95151349,"data":"bits differing from the Mac reference: 1 of 799988\n"}
+,{"stream_name":"stderr","time":639.414158156,"data":"/kaggle/working/repo/submission_ml/mlddense.py:26: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)\n"}
+,{"stream_name":"stderr","time":639.41424676,"data":"  N=[torch.from_numpy(np.ascontiguousarray(N[k])).to(device) for k in range(5)],\n"}
+,{"stream_name":"stderr","time":639.414252954,"data":"\n"}
+,{"stream_name":"stderr","time":639.414257883,"data":"/kaggle/working/repo/submission_ml/mlddense.py:26: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)\n"}
+,{"stream_name":"stderr","time":639.414265372,"data":"  N=[torch.from_numpy(np.ascontiguousarray(N[k])).to(device) for k in range(5)],\n"}
+,{"stream_name":"stderr","time":645.527166113,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":645.527881509,"data":"  File \"\u003cstring\u003e\", line 1, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":645.527892208,"data":"    import sys;import papermill as pm;pm.execute_notebook(\"__notebook__.ipynb\",\"__notebook__.ipynb\",progress_bar=False,log_output=True,stdout_file=sys.stdout,stderr_file=sys.stderr,allow_errors=False,timeout=43200)\n"}
+,{"stream_name":"stderr","time":645.52789756,"data":"                                      ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":645.527901409,"data":"  File \"/usr/local/lib/python3.13/dist-packages/papermill/execute.py\", line 131, in execute_notebook\n"}
+,{"stream_name":"stderr","time":645.527941385,"data":"    raise_for_execution_errors(nb, output_path)\n"}
+,{"stream_name":"stderr","time":645.527946052,"data":"    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":645.527949706,"data":"  File \"/usr/local/lib/python3.13/dist-packages/papermill/execute.py\", line 251, in raise_for_execution_errors\n"}
+,{"stream_name":"stderr","time":645.527953567,"data":"    raise error\n"}
+,{"stream_name":"stderr","time":645.527957052,"data":"papermill.exceptions.PapermillExecutionError: \n"}
+,{"stream_name":"stderr","time":645.527960859,"data":"---------------------------------------------------------------------------\n"}
+,{"stream_name":"stderr","time":645.527969804,"data":"Exception encountered at \"In [4]\":\n"}
+,{"stream_name":"stderr","time":645.527972648,"data":"---------------------------------------------------------------------------\n"}
+,{"stream_name":"stderr","time":645.527975061,"data":"ModuleNotFoundError                       Traceback (most recent call last)\n"}
+,{"stream_name":"stderr","time":645.527977478,"data":"/tmp/ipykernel_24/804220535.py in \u003ccell line: 0\u003e()\n"}
+,{"stream_name":"stderr","time":645.527980002,"data":"      3 sys.path.insert(0, 'submission_ml')\n"}
+,{"stream_name":"stderr","time":645.527982406,"data":"      4 t0 = time.time(); import decoder, mlddense, mldfast; import_seconds = time.time() - t0\n"}
+,{"stream_name":"stderr","time":645.527984848,"data":"----\u003e 5 from hackathon_2026 import load_kaggle_csv\n"}
+,{"stream_name":"stderr","time":645.527987319,"data":"      6 metrics = dict(import_seconds=import_seconds, python=platform.python_version(), torch=torch.__version__, numba=numba.__version__,\n"}
+,{"stream_name":"stderr","time":645.527989857,"data":"      7                numpy=np.__version__, cuda=torch.version.cuda, gpu=torch.cuda.get_device_name(0), cpus=os.cpu_count(),\n"}
+,{"stream_name":"stderr","time":645.527992439,"data":"\n"}
+,{"stream_name":"stderr","time":645.52799468,"data":"ModuleNotFoundError: No module named 'hackathon_2026'\n"}
+,{"stream_name":"stderr","time":645.527997065,"data":"\n"}
+,{"stream_name":"stderr","time":647.978814071,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":647.978846881,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":648.168815654,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":648.168842431,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":648.942535742,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to notebook\n"}
+,{"stream_name":"stderr","time":649.022260502,"data":"[NbConvertApp] Writing 17333 bytes to __notebook__.ipynb\n"}
+,{"stream_name":"stderr","time":651.549897514,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to html\n"}
+,{"stream_name":"stderr","time":652.083369697,"data":"[NbConvertApp] Writing 313928 bytes to __results__.html\n"}
+]
