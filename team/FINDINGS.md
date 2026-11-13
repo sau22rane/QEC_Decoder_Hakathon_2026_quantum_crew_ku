@@ -507,6 +507,41 @@ MLD_PROFILE=fast .venv/bin/python submission_template/run_local.py --decoder sub
 .venv/bin/python team/mld_eval.py --shots 50000 --M 1024 --delta 1e-5 --kmax 256
 ```
 
+## ML decoder, CPU + GPU (20:30–21:00): unpruned dense pass on the uncertain shots
+
+Files: `submission_ml/mlddense.py` (PyTorch), `submission_ml/decoder.py`, check notebook `team/kaggle_t4_check.ipynb`.
+
+- **CPU pass (numba, all threads)** on every shot with the `fast` limits, in chunks of 25k shots.
+- **GPU pass (torch)** on shots with any observable at |P − 0.5| < 0.3 (about 10% of shots): the full 16384 × 16384
+  table per character, three dense products per shot, nothing truncated. It runs in a second thread on chunk i
+  while the CPU decodes chunk i + 1.
+- **Tie rule:** the GPU answer is used unless |P − 0.5| < 5e-4, so the output shouldn't depend on the GPU model.
+  Without a GPU the decoder falls back to the CPU-only `max` profile.
+- **Tables are cached** in `submission_ml/mld_cache/` (sparse 1.7 GB + dense 5.4 GB per basis) and loaded on later
+  imports; the folder can be shipped with the hand-in so every machine uses identical tables.
+
+| `data/train`, 2×100k | LER | Time on the 10-core M4 |
+|---|---|---|
+| CPU `fast` | about 0.03389 | 6.6 s |
+| CPU `max` | 0.03386 | 104 s |
+| CPU `fast` + GPU dense (Apple MPS) | **0.03385** (X 0.03431, Z 0.03339) | 155–194 s (the Apple GPU does 180 shots/s) |
+
+- Deterministic over two runs; 154 of 800,000 bits differ from CPU `max`.
+- The accuracy gain over CPU `max` is within noise, as expected: the value is that the uncertain shots are now
+  decoded exactly by construction.
+- **Why CPU and dense GPU answers differ** (1024 uncertain X shots = 4096 bits, against the dense pass):
+  `fast` 21 bits, `max` 3 bits, `max` with the beam and eta limits removed 2 bits. So row truncation (4096 of
+  16384 entries per row) causes 2 of the 3 and the beam limits 1. All three bits sit at P within 0.03 of 0.5 on
+  shots with 10–17 fired detectors. Float32 rounding between devices is about 1.4e-5 in P, far below that.
+- **Run statistics:** `decoder.STATS` holds one dict per `decode()` call (shots, shots sent to the GPU, CPU and GPU
+  seconds, bits the GPU changed, ties, errors). `team/kaggle_t4_check.ipynb` writes `mld_metrics.json` with these
+  plus GPU matrix-product TFLOPS, dense shots/s by batch size, CPU core-seconds by thread count and a TAU sweep.
+- **Not measured:** speed on a T4 or B200. A dense pass costs about 8 × 10^9 floating-point operations per shot, so
+  roughly 20k shots per basis need a GPU that sustains tens of TFLOPS in float32 to finish in a few seconds.
+- **Gotcha:** importing torch and numba together segfaults on macOS with numba's default threading layer;
+  `decoder.py` sets `NUMBA_THREADING_LAYER=workqueue` before importing numba. Only one Python thread may call the
+  numba kernel with that layer.
+
 ## What to try next (ranked)
 
 1. **Train the NN much longer, on the GPU.**

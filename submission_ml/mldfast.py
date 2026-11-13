@@ -151,15 +151,8 @@ def _row_gather(x, k, M, idx, counts, vals):
             vals[a * M + c, k] = x[a, idx[a, c]]
 
 
-def build(circuit, M=1024, cache_dir=None, verbose=False):
-    """Tables for one circuit: dict(M, counts, cols (SZ*M,), vals (SZ*M, 5), T0i (128, SZ, 5), T4i (128, SZ, 5), r)."""
-    path = None
-    if cache_dir is not None:
-        key = hashlib.sha1((str(circuit) + f"|M={M}|v2").encode()).hexdigest()[:16]
-        path = os.path.join(cache_dir, f"mld_{key}.npz")
-        if os.path.exists(path):
-            f = np.load(path)
-            return {k: (int(f[k]) if k == "M" else f[k]) for k in f.files}
+def _terms(circuit):
+    """Log-factor terms (index, log(1 - 2p) weight, observable mask) of the three tables T0, N and T4."""
     g = _groups(circuit)
     if not (_merged(g[(1, 2)]) == _merged(g[(2, 3)]) == _merged(g[(3, 4)]) and _merged(g[(2, 2)]) == _merged(g[(3, 3)])):
         raise ValueError("middle layers are not identical")
@@ -174,6 +167,37 @@ def build(circuit, M=1024, cache_dir=None, verbose=False):
     t4 += [(a, l, c) for a, _, l, c in g.get((4, 4), [])]
     t4 += [(a << NA, l, c) for a, _, l, c in g.get((5, 5), [])]
     t4 += [(a, -0.5 * l, c) for a, _, l, c in half]
+    return t0, nn, t4
+
+
+def build_dense(circuit, cache_dir, verbose=False):
+    """The full middle table N as a float32 memmap of shape (5, SZ, SZ), N[chi, a, b]; built once, then loaded."""
+    key = hashlib.sha1((str(circuit) + "|dense|v2").encode()).hexdigest()[:16]
+    path = os.path.join(cache_dir, f"mld_{key}_N.npy")
+    if not os.path.exists(path):
+        _, nn, _ = _terms(circuit)
+        os.makedirs(cache_dir, exist_ok=True)
+        N = np.lib.format.open_memmap(path + ".tmp.npy", mode="w+", dtype=np.float32, shape=(5, SZ, SZ))
+        for k, chi in enumerate(CHIS):
+            N[k] = _table(28, nn, chi).reshape(SZ, SZ)
+            if verbose:
+                print(f"  dense chi {chi} done", flush=True)
+        N.flush()
+        del N
+        os.replace(path + ".tmp.npy", path)
+    return np.load(path, mmap_mode="r")
+
+
+def build(circuit, M=1024, cache_dir=None, verbose=False):
+    """Tables for one circuit: dict(M, counts, cols (SZ*M,), vals (SZ*M, 5), T0i (128, SZ, 5), T4i (128, SZ, 5), r)."""
+    path = None
+    if cache_dir is not None:
+        key = hashlib.sha1((str(circuit) + f"|M={M}|v2").encode()).hexdigest()[:16]
+        path = os.path.join(cache_dir, f"mld_{key}.npz")
+        if os.path.exists(path):
+            f = np.load(path)
+            return {k: (int(f[k]) if k == "M" else f[k]) for k in f.files}
+    t0, nn, t4 = _terms(circuit)
     T0i = np.empty((128, SZ, 5), np.float32)
     T4i = np.empty((128, SZ, 5), np.float32)
     counts = np.zeros(SZ, np.int64)
@@ -198,7 +222,7 @@ def build(circuit, M=1024, cache_dir=None, verbose=False):
     return tb
 
 
-@nb.njit(parallel=True, cache=True)
+@nb.njit(parallel=True, cache=True, nogil=True)
 def _fast(i0, i1, i2, i3, i4, i5, T0i, T4i, M, counts, cols, vals, r, delta, kmax, eta, out):
     n = len(i0)
     CH = 64
