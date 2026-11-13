@@ -208,6 +208,103 @@ learned worse per shot. With length-grouped batches it reached 0.105 at 28M shot
   their LER (0.025) is far worse than BP-OSD on the same shots. Our cascade already does the useful part (a cheap
   pass with BP shortcut, OSD only where needed).
 
+## Rule update (upstream README, seen 16:40): t_cap = 15.4 s, α = 0.2, import time is free
+
+- **t_cap is the organisers' BP+OSD on all test shots with 32 threads: 15.4 s** (was provisionally 3 s). We are
+  timed with 48 threads.
+- **α = 0.2:** each doubling beyond t_cap costs about 15% (was 7%). So stay under the cap rather than trading LER
+  for time.
+- **Only the two `decode` calls are timed.** Importing the decoder, and anything it builds or loads at import, is
+  free. The hand-in now builds the matrices and compiles the numba kernels at import, using bundled copies of the
+  competition circuits.
+- **The earlier final-score tables** (t_cap = 3 s, α = 0.1) are superseded. All our cascades are far under
+  15.4 s.
+
+Thread scaling on the Mac (Apple M5 Pro, 6 performance + 12 efficiency cores), three-level cascade, 2×50k shots:
+
+| Threads | Time | Speed-up |
+|---|---|---|
+| 1 | 84.0 s | 1× |
+| 6 | 16.2 s | 5.2× |
+| 12 | 8.8 s | 9.5× |
+| 18 | 7.2 s | 11.7× |
+
+Per-shot parallelism is near-linear, so 48 EPYC 9655 threads are probably about 2–3× the Mac. That's an estimate,
+not measured.
+
+Accuracy-focused cascades, full `data/train`, clean timing (median of 3, 18 threads):
+
+| Decoder | LER | Mac time | Score if timing machine = Mac (t_cap 15.4 s, α 0.2) |
+|---|---|---|---|
+| cascade 0.4 → heavy (previous hand-in) | 0.03552 | 4.18 s | 0.03552 |
+| heavy on every shot | 0.03494 | 13.05 s | 0.03494 |
+| cheap → 0.49 heavy + 32 perturbed | 0.03469 | 11.48 s | 0.03469 |
+| **cheap → 0.49 heavy → 0.4 SUPER (new hand-in)** | **0.03459** | **13.73 s** | **0.03459** |
+| heavy every shot → 0.4 SUPER | 0.03436 | 22.29 s | 0.03700 (fits only if the machine is ≥ 1.45× the Mac) |
+
+SUPER = heavy with OSD-CS 1500/80 plus 32 perturbed OSD-CS 200/30 runs.
+
+**New hand-in** (`submission_template/decoder.py`, three levels):
+- `run_local.py`: LER **0.03459** (X 0.03517, Z 0.03401), median **13.3–13.4 s** over 5 runs;
+- deterministic;
+- the first run is as fast as the rest, thanks to the import-time warm-up.
+
+It stays under t_cap even if the timing machine is no faster than the Mac. If the organisers confirm the machine
+is ≥ 1.5× faster, "heavy every shot → 0.4 SUPER" (0.03436) is the next step up.
+
+## Stacked NN on BP-OSD (PLAN_NEXT Part 2): no-go
+
+Setup:
+- `team/nn/make_stack_features.py` generated cheap-pass features (seeds ≥ 50000, 15 chunks of 1M for X).
+- `team/nn/train_stack.py` trained a residual MLP 512×3 on 89 features. Its output is added to the decoder's
+  clipped per-bit logit, with a zero-initialised last layer.
+
+Result, X basis, 392 s of training (119M samples, re-using up to 15 chunks): validation LER **0.0378–0.0384**
+against the decoder's own **0.0376** on the same shots. It never beat the decoder, so I stopped it at the go/no-go.
+The likely reasons are that the decoder's class sums are already close to calibrated (see Calibration), and that
+chunk re-use invites fitting label noise.
+
+## Search diversity (PLAN_NEXT Part 1): perturbed orderings help LER, not the final score
+
+New `bposd2` options:
+- `n_perturb`, `perturb_scale`, `perturb_mode`, `perturb_single`, `perturb_pair`: extra OSD-CS runs seeded by
+  fixed-seed noisy copies of the last BP posterior. Only the first 512 columns of the base order are re-sorted,
+  1.7× cheaper with identical LER.
+- `dec_*`: BP guided decimation.
+
+Heavy pass, 2×20k paired validation shots:
+
+| Variant | LER | Δ vs heavy | µs/shot |
+|---|---|---|---|
+| heavy (3 BP orderings, 800/60) | 0.03544 | — | 61 |
+| + 8 perturbed 100/20, additive sd 0.5 / 1 / 2 / 4 | 0.03513 / 0.03509 / 0.03521 / 0.03546 | −0.0003 / −0.00035 / −0.0002 / 0 | 135–148 |
+| + 8 perturbed, multiplicative sd 0.3 / 0.6 | 0.03515 / 0.03537 | −0.0003 / −0.0001 | 156–164 |
+| + 16 perturbed 100/20 (head sort) | 0.03508 | −0.00036 ± 0.00016 | 121 |
+| + 16 perturbed 200/30 (head sort) | 0.03491 | −0.00052 ± 0.00018 | 153 |
+| + 32 perturbed 100/20 (head sort) | 0.03479 | −0.00064 ± 0.00018 | 180 |
+| 1 BP ordering 400/40 + 16–32 perturbed | 0.03536–0.03539 | ≈0 | 170–326 |
+| + BPGD solutions only (15 steps, 3 iterations, 1 or 3 branches) | 0.03544 | 0.0000 | 91–135 |
+| + BPGD, 4 decimation orderings | 0.03519 | −0.00025 | 156 |
+| + BPGD 5 branches + 32 perturbed | 0.03478 | −0.00066 (= perturbed alone) | 339 |
+
+Cascade, full `data/train`, clean timing (median of 3, 18-core Mac). Score uses t_cap = 3 s; "2×" assumes the
+timing machine is twice as fast.
+
+| Cascade | LER | Time | Score if machine = Mac | Score if 2× faster |
+|---|---|---|---|---|
+| **τ 0.4 → heavy (hand-in)** | **0.03552** | **3.90 s** | **0.03646** | **0.03552** |
+| τ 0.4 → heavy + 16 perturbed 200/30 | 0.03523 | 6.57 s | 0.03811 | 0.03555 |
+| τ 0.4 → heavy + 32 perturbed 100/20 | 0.03522 | 7.44 s | 0.03856 | 0.03598 |
+| τ 0.45 → heavy + 16 perturbed 200/30 | 0.03501 | 7.98 s | 0.03861 | 0.03602 |
+| τ 0.45 → heavy + 32 perturbed 100/20 | 0.03499 | 8.88 s | 0.03900 | 0.03639 |
+
+- **Perturbed orderings are the only search-diversity idea that helped** (−0.0003 to −0.0006).
+- **BPGD's own solutions add nothing,** and its orderings are a weaker version of the same effect.
+- **Inside the cascade the gain is about −0.0003 for +70–130% runtime,** a net loss in final score under both
+  speed assumptions. The hand-in stays as it is.
+- **Still useful for leaderboard rank (step 1 is LER only):** τ 0.45 → heavy + 16 perturbed 200/30 gives 0.0350 on
+  `data/train`.
+
 ## Relay-BP (memory-BP legs, Müller et al. 2025): converges, but no useful gain
 
 Implemented in `bposd2` (`relay_*` options, `_relay` kernel):

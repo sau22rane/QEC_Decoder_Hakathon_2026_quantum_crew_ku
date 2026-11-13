@@ -19,8 +19,10 @@ Don't re-run experiments it already answers.
 - **Be deterministic.** The predictions must reproduce the selected Kaggle submission, so fix seeds.
 - **Scoring:**
   - Leaderboard: per-bit LER.
-  - Top 10 final score: LER × max(1, t / t_cap)^0.1, with t_cap ≈ 3 s (provisional) for 2×100k shots on 48 EPYC
-    cores + B200. Hard limit 5 minutes.
+  - Top 10 final score: LER × max(1, t / t_cap)^0.2, with **t_cap = 15.4 s** (organisers' BP+OSD, 32 threads) for
+    2×100k shots. We're timed with 48 threads on 48 EPYC cores + B200. Hard limit 5 minutes. Each doubling beyond
+    t_cap costs about 15%.
+  - **Only the two `decode` calls are timed;** import-time work (building matrices, JIT warm-up) is free.
 - **Kaggle:** about 5–10 submissions per day, shared by the team. Submitting is outward-facing, so confirm with the
   user first.
 
@@ -53,7 +55,9 @@ Don't re-run experiments it already answers.
 
 - **Decoder:** `team/decoders/bposd2.py`. `decode_full()` returns the most-likely-error bits, the 16-class posterior
   and the per-bit marginals.
-- **Cheap configuration (submitted, LER 0.0371, ~3 s on an 18-core Mac):** `schedule=1` (layered), `max_iter=2`,
+- **Current hand-in:** `submission_template/decoder.py`, a three-level cascade (cheap → 0.49 heavy → 0.4 SUPER):
+  LER 0.03459, 13.4 s on an 18-core Mac, with import-time warm-up.
+- **Cheap configuration (LER 0.0371, ~2.4 s on an 18-core Mac):** `schedule=1` (layered), `max_iter=2`,
   `alpha=0.45`, `snaps=(2,)`, `n_single=200`, `n_pair=30`, `degenerate=True`, `shortcut=True`.
 - **Cascade:** `team/decoders/cascade.py`. Re-decode shots with min |P − 0.5| < τ using HEAVY (3 orderings, 800/60).
   τ = 0.3 gives LER 0.0358 at ~1.8× the time.

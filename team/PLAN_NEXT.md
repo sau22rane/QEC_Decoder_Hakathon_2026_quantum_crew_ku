@@ -1,5 +1,10 @@
 # Plan: close the gap to the leaders (search diversity, stacked NN, time budget)
 
+> **Status 16:55 CET:** Step 0 done (commit 22abab3). Part 1: perturbed orderings help (−0.0003 to −0.0006),
+> BPGD doesn't. Part 2: no-go. Part 3: the rules changed (t_cap = 15.4 s, α = 0.2, import time free), and the hand-in
+> is now a three-level cascade with LER 0.03459 in 13.4 s on the Mac. Details are in FINDINGS.md. Not yet done:
+> the stronger Kaggle submission (the user asked to wait) and selecting the 2 finals before 23:59.
+
 Written 2026-11-13 16:15 CET, revised 16:20. The competition closes at **23:59 CET**. This is a brief for a fresh
 session: read `team/FINDINGS.md` and `.claude/skills/qec-decoder-hackathon/SKILL.md` first, then follow the steps
 below in order.

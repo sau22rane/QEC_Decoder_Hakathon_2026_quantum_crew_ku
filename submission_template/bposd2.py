@@ -11,6 +11,11 @@ New options compared with v1:
   shortcut      skip OSD when BP converges (the class posterior is then one-hot on BP's solution)
   bp_scale      multiply the BP priors' LLRs by this (OSD costs always use the true priors)
   temp          temperature of the class sum: each candidate adds exp(-cost / temp) (1.0 = true probabilities)
+  n_perturb     extra OSD-CS runs (perturb_single/perturb_pair) seeded by noisy copies of the last BP posterior
+  dec_*         BP guided decimation: fix the likeliest mechanism, re-run dec_iters BP iterations, repeat up to
+                dec_steps times; dec_branch first-step branches; dec_osd decimation posteriors seed OSD-CS runs
+  relay_*       Relay-BP (memory-BP legs) after the normal pass: every converged leg adds a candidate, and the first
+                relay_osd legs' marginals seed extra OSD-CS runs (relay_legs = 0 disables it)
 
 decode_full() also returns the 16-class posterior per shot, used for confidence-gated hybrids.
 """
@@ -21,7 +26,11 @@ import stim
 from hackathon_2026 import problem_info
 
 DEFAULTS = dict(schedule=1, max_iter=3, alpha=0.45, snaps=(3,), n_single=200, n_pair=30, degenerate=True,
-                shortcut=False, bp_scale=1.0, n_expand=0, temp=1.0)
+                shortcut=False, bp_scale=1.0, n_expand=0, temp=1.0,
+                relay_legs=0, relay_T0=80, relay_T=60, relay_S=5, relay_alpha=1.0, relay_osd=0,
+                relay_gmin=-0.24, relay_gmax=0.66, relay_g0=0.125,
+                n_perturb=0, perturb_scale=1.0, perturb_mode=0, perturb_single=100, perturb_pair=20,
+                dec_steps=0, dec_iters=3, dec_branch=1, dec_osd=0)
 
 
 _DEBRUIJN = np.zeros(64, np.int64)
@@ -38,6 +47,7 @@ class _Problem:
         self.prior_llr = np.log((1 - p) / p)
         chk, var = np.nonzero(H)
         self.edge_var = var.astype(np.int32)
+        self.edge_chk = chk.astype(np.int32)  # check of each edge (edges are sorted by check)
         self.chk_ptr = np.concatenate([[0], np.cumsum(np.bincount(chk, minlength=m))]).astype(np.int32)
         self.var_edges = np.argsort(var, kind="stable").astype(np.int32)
         self.var_ptr = np.concatenate([[0], np.cumsum(np.bincount(var, minlength=n))]).astype(np.int32)
@@ -281,9 +291,210 @@ def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pa
 
 
 @nb.njit(cache=True)
+def _relay(syn, prior_llr, edge_var, chk_ptr, var_edges, var_ptr, obsmask, zob, gam, T0, T, S, alpha, n_keep,
+           keep_post, cc, co, ch, nc):
+    """Relay-BP (Mueller et al. 2025): legs of min-sum BP with per-mechanism memory strengths gam[leg, v].
+
+    Each iteration uses the prior mixed with the previous marginal, lam = (1 - g) * prior + g * M; negative g pushes BP
+    away from where it is stuck. Each leg starts from the previous leg's marginals ("relay"). Every converged leg adds
+    its error (cost, observables, Zobrist hash) as a candidate; we stop after S solutions. The final marginals of the
+    first n_keep legs are kept as extra OSD orderings. Returns (new nc, number of kept marginals).
+    """
+    m = chk_ptr.shape[0] - 1
+    n = var_ptr.shape[0] - 1
+    E = edge_var.shape[0]
+    M = prior_llr.copy()
+    lam = np.empty(n)
+    v2c = np.empty(E)
+    c2v = np.zeros(E)
+    hard = np.zeros(n, np.uint8)
+    found = 0
+    kept = 0
+    for r in range(gam.shape[0]):
+        iters = T0 if r == 0 else T
+        for e in range(E):
+            v2c[e] = M[edge_var[e]]
+            c2v[e] = 0.0
+        for it in range(iters):
+            for v in range(n):
+                g = gam[r, v]
+                lam[v] = (1.0 - g) * prior_llr[v] + g * M[v]
+            for c in range(m):
+                a, b = chk_ptr[c], chk_ptr[c + 1]
+                sgn = -1.0 if syn[c] else 1.0
+                min1 = 1e300
+                min2 = 1e300
+                amin = -1
+                for e in range(a, b):
+                    x = v2c[e]
+                    if x < 0:
+                        sgn = -sgn
+                        x = -x
+                    if x < min1:
+                        min2 = min1
+                        min1 = x
+                        amin = e
+                    elif x < min2:
+                        min2 = x
+                for e in range(a, b):
+                    mag = min2 if e == amin else min1
+                    c2v[e] = alpha * (sgn if v2c[e] >= 0 else -sgn) * mag
+            for v in range(n):
+                tot = lam[v]
+                for k in range(var_ptr[v], var_ptr[v + 1]):
+                    tot += c2v[var_edges[k]]
+                M[v] = tot
+                hard[v] = 1 if tot < 0 else 0
+                for k in range(var_ptr[v], var_ptr[v + 1]):
+                    e = var_edges[k]
+                    v2c[e] = tot - c2v[e]
+            ok = True
+            for c in range(m):
+                par = 0
+                for e in range(chk_ptr[c], chk_ptr[c + 1]):
+                    par ^= hard[edge_var[e]]
+                if par != syn[c]:
+                    ok = False
+                    break
+            if ok:
+                cost = 0.0
+                obs = np.uint8(0)
+                h = np.uint64(0)
+                for v in range(n):
+                    if hard[v]:
+                        cost += prior_llr[v]
+                        obs ^= obsmask[v]
+                        h ^= zob[v]
+                cc[nc], co[nc], ch[nc] = cost, obs, h
+                nc += 1
+                found += 1
+                break
+        if kept < n_keep:
+            keep_post[kept] = M
+            kept += 1
+        if found >= S:
+            break
+    return nc, kept
+
+
+@nb.njit(cache=True)
+def _bp_layered(syn, llr, edge_var, chk_ptr, max_deg, iters, alpha, post, hard):
+    """Layered min-sum BP from fresh messages on (syn, llr); fills post/hard; returns True if H hard = syn."""
+    m = chk_ptr.shape[0] - 1
+    n = llr.shape[0]
+    E = edge_var.shape[0]
+    c2v = np.zeros(E)
+    tmp = np.empty(max_deg)
+    for v in range(n):
+        post[v] = llr[v]
+    for it in range(iters):
+        for c in range(m):
+            a, b = chk_ptr[c], chk_ptr[c + 1]
+            sgn = -1.0 if syn[c] else 1.0
+            min1 = 1e300
+            min2 = 1e300
+            amin = -1
+            for e in range(a, b):
+                x = post[edge_var[e]] - c2v[e]
+                tmp[e - a] = x
+                if x < 0:
+                    sgn = -sgn
+                    x = -x
+                if x < min1:
+                    min2 = min1
+                    min1 = x
+                    amin = e
+                elif x < min2:
+                    min2 = x
+            for e in range(a, b):
+                x = tmp[e - a]
+                mag = min2 if e == amin else min1
+                new = alpha * (sgn if x >= 0 else -sgn) * mag
+                post[edge_var[e]] = x + new
+                c2v[e] = new
+        for v in range(n):
+            hard[v] = 1 if post[v] < 0 else 0
+        ok = True
+        for c in range(m):
+            par = 0
+            for e in range(chk_ptr[c], chk_ptr[c + 1]):
+                par ^= hard[edge_var[e]]
+            if par != syn[c]:
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
+@nb.njit(cache=True)
+def _bpgd(syn, prior_llr, edge_var, chk_ptr, var_edges, var_ptr, edge_chk, max_deg, obsmask, zob, steps, iters,
+          alpha, branch, n_keep, keep_post, cc, co, ch, nc):
+    """BP guided decimation: repeatedly fix the most likely remaining mechanism (XOR its column into the residual
+    syndrome, forbid it in BP) and re-run a few BP iterations, until BP converges on the residual. Each converged run
+    adds (fixed set + BP solution) as a candidate. With branch > 1, the first decision is taken for each of the top
+    `branch` mechanisms, giving several distinct solutions. The posteriors after the first n_keep decimation steps
+    (decimated mechanisms forced to the front) are kept as extra OSD orderings."""
+    m = chk_ptr.shape[0] - 1
+    n = prior_llr.shape[0]
+    post = np.empty(n)
+    hard = np.zeros(n, np.uint8)
+    kept = 0
+    # first BP on the full problem decides the branch candidates
+    _bp_layered(syn, prior_llr, edge_var, chk_ptr, max_deg, iters, alpha, post, hard)
+    first = np.argsort(post)[:max(branch, 1)]
+    for br in range(first.shape[0]):
+        llr = prior_llr.copy()
+        res = syn.copy()
+        fixed = np.zeros(n, np.uint8)
+        cost = 0.0
+        obs = np.uint8(0)
+        h = np.uint64(0)
+        v = first[br]
+        for step in range(steps):
+            # fix mechanism v
+            fixed[v] = 1
+            cost += prior_llr[v]
+            obs ^= obsmask[v]
+            h ^= zob[v]
+            for k in range(var_ptr[v], var_ptr[v + 1]):
+                c = edge_chk[var_edges[k]]
+                res[c] ^= 1
+            llr[v] = 1e6
+            ok = _bp_layered(res, llr, edge_var, chk_ptr, max_deg, iters, alpha, post, hard)
+            if br == 0 and kept < n_keep:
+                for u in range(n):
+                    keep_post[kept, u] = -1e6 if fixed[u] else post[u]
+                kept += 1
+            if ok:
+                c2 = cost
+                o2 = obs
+                h2 = h
+                for u in range(n):
+                    if hard[u]:
+                        c2 += prior_llr[u]
+                        o2 ^= obsmask[u]
+                        h2 ^= zob[u]
+                cc[nc], co[nc], ch[nc] = c2, o2, h2
+                nc += 1
+                break
+            # next: most likely mechanism not yet fixed
+            best = 1e300
+            v = -1
+            for u in range(n):
+                if not fixed[u] and post[u] < best:
+                    best = post[u]
+                    v = u
+            if v < 0:
+                break
+    return nc, kept
+
+
+@nb.njit(cache=True)
 def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob,
           rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand,
-          inv_temp, probs_out, stats_out):
+          inv_temp, gam, relay_T0, relay_T, relay_S, relay_alpha, relay_osd, pert, pert_mode, pert_single,
+          pert_pair, edge_chk, dec_steps, dec_iters, dec_branch, dec_osd, probs_out, stats_out):
     m = chk_ptr.shape[0] - 1
     n = var_ptr.shape[0] - 1
     E = edge_var.shape[0]
@@ -380,6 +591,10 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
 
     maxlen = rank_full + 4
     base_c = 1 + nsnap * (1 + n_single + n_pair * (n_pair - 1) // 2)
+    per_osd = 1 + n_single + n_pair * (n_pair - 1) // 2
+    base_c += gam.shape[0] + relay_osd * per_osd
+    base_c += pert.shape[0] * (1 + pert_single + pert_pair * (pert_pair - 1) // 2)
+    base_c += max(dec_branch, 1) * (dec_steps > 0) + dec_osd * per_osd
     max_c = base_c + n_expand * 600
     cc = np.empty(max_c)
     co = np.empty(max_c, np.uint8)
@@ -412,6 +627,42 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
         order = np.argsort(snap_post[s])
         nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols,
                   ncol, n_expand > 0)
+    # randomly perturbed copies of the last BP posterior: each seeds a small OSD-CS run (more diverse candidates)
+    if pert.shape[0] > 0 and nsnap > 0:
+        base = snap_post[nsnap - 1]
+        border = np.argsort(base)
+        # small noise only reshuffles the front of the order: re-sort just the first K columns of the base order
+        K = min(n, 512)
+        head = np.empty(K)
+        order = border.copy()
+        for q in range(pert.shape[0]):
+            for r in range(K):
+                v = border[r]
+                if pert_mode == 0:
+                    head[r] = base[v] + pert[q, v]
+                else:
+                    head[r] = base[v] * np.exp(pert[q, v])
+            hs = np.argsort(head)
+            for r in range(K):
+                order[r] = border[hs[r]]
+            nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, pert_single, pert_pair, cc, co, ch,
+                      nc, cols, ncol, n_expand > 0)
+    if dec_steps > 0:
+        dpost = np.empty((max(dec_osd, 1), n))
+        nc, dkept = _bpgd(syn, prior_llr, edge_var, chk_ptr, var_edges, var_ptr, edge_chk, max_deg, obsmask, zob,
+                          dec_steps, dec_iters, alpha, dec_branch, dec_osd, dpost, cc, co, ch, nc)
+        for q in range(dkept):
+            order = np.argsort(dpost[q])
+            nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, n_single, n_pair, cc, co, ch, nc,
+                      cols, ncol, n_expand > 0)
+    if gam.shape[0] > 0:
+        keep_post = np.empty((max(relay_osd, 1), n))
+        nc, kept = _relay(syn, prior_llr, edge_var, chk_ptr, var_edges, var_ptr, obsmask, zob, gam, relay_T0, relay_T,
+                          relay_S, relay_alpha, relay_osd, keep_post, cc, co, ch, nc)
+        for s in range(kept):
+            order = np.argsort(keep_post[s])
+            nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, n_single, n_pair, cc, co, ch, nc,
+                      cols, ncol, n_expand > 0)
     if nc == 0:
         probs_out[0] = 1.0
         stats_out[0] = 1e300
@@ -471,7 +722,9 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
 
 @nb.njit(parallel=True, cache=True)
 def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob, rank_full,
-         schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand, inv_temp):
+         schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand, inv_temp, gam,
+         relay_T0, relay_T, relay_S, relay_alpha, relay_osd, pert, pert_mode, pert_single, pert_pair, edge_chk,
+         dec_steps, dec_iters, dec_branch, dec_osd):
     shots, m = dets.shape
     best = np.zeros(shots, np.uint8)
     probs = np.zeros((shots, 16))
@@ -494,8 +747,37 @@ def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg
             continue
         best[i] = _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits,
                         obsmask, zob, rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut,
-                        tri_ptr, tri_other, n_expand, inv_temp, probs[i], stats[i])
+                        tri_ptr, tri_other, n_expand, inv_temp, gam, relay_T0, relay_T, relay_S,
+                        relay_alpha, relay_osd, pert, pert_mode, pert_single, pert_pair, edge_chk, dec_steps,
+                        dec_iters, dec_branch, dec_osd, probs[i], stats[i])
     return best, probs, stats
+
+
+_GAM = {}
+
+
+def _gammas(n, o):
+    """Memory strengths for the Relay-BP legs, (legs, n): leg 0 uses relay_g0 everywhere, later legs are uniform in
+    [relay_gmin, relay_gmax]. Fixed seed, so decoding stays deterministic."""
+    key = (n, o["relay_legs"], o["relay_gmin"], o["relay_gmax"], o["relay_g0"])
+    if key not in _GAM:
+        g = np.random.default_rng(7).uniform(o["relay_gmin"], o["relay_gmax"], (o["relay_legs"], n))
+        if o["relay_legs"] > 0:
+            g[0] = o["relay_g0"]
+        _GAM[key] = g
+    return _GAM[key]
+
+
+_PERT = {}
+
+
+def _perturbations(n, o):
+    """Fixed-seed Gaussian noise (n_perturb, n) for the perturbed OSD orderings (deterministic decoding).
+    perturb_mode 0: added to the posterior LLRs; 1: multiplies them by exp(noise)."""
+    key = (n, o["n_perturb"], o["perturb_scale"])
+    if key not in _PERT:
+        _PERT[key] = np.random.default_rng(11).normal(0.0, o["perturb_scale"], (o["n_perturb"], n))
+    return _PERT[key]
 
 
 CLASS_BITS = ((np.arange(16)[:, None] >> np.arange(4)) & 1).astype(np.float64)  # (16, 4)
@@ -511,7 +793,10 @@ def decode_full(circuit, detector_events, return_stats=False, **kw):
                        P.max_deg, P.colbits, P.obsmask, P.zobrist, P.rank, o["schedule"], o["max_iter"], o["alpha"],
                        np.asarray(sorted(o["snaps"]), np.int64), o["n_single"], o["n_pair"], o["shortcut"],
                        *(P.triples() if o["n_expand"] > 0 else (np.zeros(P.n + 1, np.int32), np.zeros((0, 2), np.int32))),
-                       o["n_expand"], 1.0 / o["temp"])
+                       o["n_expand"], 1.0 / o["temp"], _gammas(P.n, o), o["relay_T0"], o["relay_T"],
+                       o["relay_S"], o["relay_alpha"], o["relay_osd"], _perturbations(P.n, o), o["perturb_mode"],
+                       o["perturb_single"], o["perturb_pair"], P.edge_chk, o["dec_steps"], o["dec_iters"],
+                       o["dec_branch"], o["dec_osd"])
     best_bits = ((best[:, None] >> np.arange(P.num_obs, dtype=np.uint8)) & 1).astype(np.uint8)
     # plain sums instead of a matmul: macOS Accelerate raises spurious warnings on subnormal probabilities
     marg = np.stack([probs[:, CLASS_BITS[:, j] == 1].sum(1) for j in range(P.num_obs)], axis=1)
