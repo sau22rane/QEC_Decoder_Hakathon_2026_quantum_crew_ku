@@ -252,6 +252,62 @@ SUPER = heavy with OSD-CS 1500/80 plus 32 perturbed OSD-CS 200/30 runs.
 It stays under t_cap even if the timing machine is no faster than the Mac. If the organisers confirm the machine
 is ≥ 1.5× faster, "heavy every shot → 0.4 SUPER" (0.03436) is the next step up.
 
+## Accuracy round 2 (17:00–17:45): routing is the lever; extra BP orderings and weight-3 flips aren't
+
+New `bposd2` options:
+- `extra_bp=((schedule, iterations, α), ...)`: independent BP runs with other settings, each seeding an OSD-CS run;
+- `n_triple`: OSD-CS also tries every triple among the first n candidates.
+
+**Inside SUPER (full cascade, 2×50k paired validation shots):**
+
+| Variant | LER | Δ vs hand-in |
+|---|---|---|
+| hand-in (cheap → 0.49 heavy → 0.4 SUPER) | 0.03471 | — |
+| SUPER + one extra BP (flood 3 it α 0.8 / layered 2 it α 0.8 / layered 1 it / flood 10 it α 1.0) | 0.03467–0.03471 | −0.00004 to 0 |
+| SUPER + all four extra BPs | 0.03463 | −0.00007 ± 0.00003 |
+| SUPER + triples among 10 / 15 / 20 | 0.03470–0.03471 | 0 |
+
+**Where the hand-in's remaining errors are** (2×50k validation shots):
+
+| Final level | Share of shots | Share of wrong bits |
+|---|---|---|
+| cheap only | 79.6% | 12.6% |
+| heavy | 8.5% | 10.4% |
+| SUPER | 11.9% | 77.0% |
+
+- Shots where BP converged (one-hot, never escalated) are 19.9% of shots but only 0.2% of the wrong bits.
+- Cheap-only shots where BP didn't converge but the decoder was confident (margin ≥ 0.49) hold **12.4%** of the
+  wrong bits. That's the one routing lever left.
+
+**Routing variants** (same paired shots):
+
+| Variant | LER | Δ | µs/shot |
+|---|---|---|---|
+| hand-in | 0.03471 | — | 62 |
+| cheap → **0.5** heavy (all unconverged) → 0.4 SUPER | 0.03442 | **−0.00029 ± 0.00006** | 106–110 |
+| cheap → 0.5 heavy → 0.45 SUPER | 0.03437 | −0.00034 ± 0.00007 | 122 |
+| cheap → 0.5 MED (it 1, 3, 200/30) → 0.49 heavy → 0.4 SUPER | 0.03456 | −0.00015 | 94 |
+| cheap → 0.5 MED1 (it 1 only) → … | 0.03516 | +0.00046 (a worse middle estimate overrides the cheap one) | 82 |
+| **cheap with 2 orderings (it 1, 2)** → 0.49 heavy → 0.4 SUPER | 0.03454 | −0.00016 ± 0.00005 | 79 |
+
+**Full `data/train`, clean timing (median of 3).** Score columns use t_cap 15.4 s and α 0.2, assuming the timing
+machine is equal to / 1.5× / 2× the Mac.
+
+| Decoder | LER | Mac time | Score at equal / 1.5× / 2× |
+|---|---|---|---|
+| previous hand-in | 0.03459 | 12.6 s | 0.03459 / 0.03459 / 0.03459 |
+| **robust: cheap2 → 0.49 heavy → 0.4 SUPER (new hand-in)** | **0.03445** | **15.6 s** (14.5 s in `run_local`) | 0.03452 / 0.03445 / 0.03445 |
+| cheap2 → 0.49 heavy → 0.45 SUPER + 4 extra BP | 0.03440 | 22.9 s | 0.03724 / 0.03440 / 0.03440 |
+| **wide: cheap → 0.5 heavy → 0.4 SUPER** | **0.03436** | **23.2 s** | 0.03730 / 0.03439 / 0.03436 |
+| wide + 0.45 SUPER + 4 extra BP | 0.03433 | 28.6 s | 0.03884 / 0.03582 / 0.03433 |
+
+`submission_template/decoder.py` now has `PROFILE = "robust"` (default) or `"wide"`:
+- robust: `run_local` LER 0.03445, median 14.5 s, file `submission_test_robust.csv`;
+- wide: LER 0.03436, median 23.2 s, file `submission_test_wide.csv`.
+
+Both are deterministic. The hand-in must match the selected Kaggle submission, so set `PROFILE` accordingly before
+handing in.
+
 ## Stacked NN on BP-OSD (PLAN_NEXT Part 2): no-go
 
 Setup:

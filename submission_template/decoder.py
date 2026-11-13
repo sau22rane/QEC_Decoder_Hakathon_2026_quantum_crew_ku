@@ -1,7 +1,7 @@
 """Hand-in decoder: degenerate BP-OSD in a three-level confidence cascade (numpy + numba only, no QEC libraries).
 
 1. Cheap pass on every shot: layered min-sum BP (2 iterations, alpha 0.45); if BP converges use its error,
-   otherwise OSD-CS 200/30 seeded by BP's posterior. Every distinct error found adds its probability to its
+   otherwise two OSD-CS 200/30 runs seeded by BP's posteriors after iterations 1 and 2. Every distinct error found adds its probability to its
    logical class, and each observable is decided by its marginal probability (approximate maximum-likelihood
    / degenerate decoding).
 2. Shots whose least certain observable has |P(L_j = 1) - 0.5| < 0.49 are re-decoded by the heavy pass: three
@@ -9,7 +9,10 @@
 3. Shots still uncertain (|P - 0.5| < 0.4) get the SUPER pass: heavy with OSD-CS 1500/80 plus 32 extra OSD-CS
    200/30 runs seeded by fixed-seed perturbations of the BP posterior.
 
-Measured on data/train (2x100k shots): LER 0.03459, 13.7 s on an 18-core Apple M5 Pro (t_cap = 15.4 s).
+Measured on data/train (2x100k shots): LER 0.03445, 15.6 s on an 18-core Apple M5 Pro (t_cap = 15.4 s on 48
+EPYC threads, which our thread-scaling test suggests are ~2-3x the Mac).
+PROFILE = "wide" sends every unconverged shot to the heavy pass: LER 0.03436, 23.2 s on the Mac (worth it only if the
+timing machine is >= 1.5x the Mac).
 Deterministic: all randomness uses fixed seeds.
 
 Import time is not timed (README, Final ranking), so the matrices for the competition circuits are built and the
@@ -25,11 +28,15 @@ import stim  # noqa: E402
 
 import bposd2  # noqa: E402
 
-CHEAP = dict(schedule=1, max_iter=2, alpha=0.45, snaps=(2,), n_single=200, n_pair=30, degenerate=True, shortcut=True)
+CHEAP = dict(schedule=1, max_iter=2, alpha=0.45, snaps=(1, 2), n_single=200, n_pair=30, degenerate=True,
+             shortcut=True)
+CHEAP1 = {**CHEAP, "snaps": (2,)}
 HEAVY = dict(schedule=1, max_iter=3, alpha=0.45, snaps=(1, 2, 3), n_single=800, n_pair=60, degenerate=True,
              shortcut=False)
 SUPER = {**HEAVY, "n_single": 1500, "n_pair": 80, "n_perturb": 32, "perturb_single": 200, "perturb_pair": 30}
-LEVELS = [(None, CHEAP), (0.49, HEAVY), (0.4, SUPER)]
+PROFILE = "robust"
+LEVELS = {"robust": [(None, CHEAP), (0.49, HEAVY), (0.4, SUPER)],
+          "wide": [(None, CHEAP1), (0.5, HEAVY), (0.4, SUPER)]}[PROFILE]
 
 
 def decode(circuit: stim.Circuit, detector_events: np.ndarray) -> np.ndarray:

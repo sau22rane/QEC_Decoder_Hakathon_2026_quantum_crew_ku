@@ -12,6 +12,9 @@ New options compared with v1:
   bp_scale      multiply the BP priors' LLRs by this (OSD costs always use the true priors)
   temp          temperature of the class sum: each candidate adds exp(-cost / temp) (1.0 = true probabilities)
   n_perturb     extra OSD-CS runs (perturb_single/perturb_pair) seeded by noisy copies of the last BP posterior
+  n_triple      OSD-CS also tries every triple of flips among the first n_triple candidates (main and extra runs)
+  extra_bp      ((schedule, iterations, alpha), ...): independent BP runs with other settings, each seeding an
+                OSD-CS run with extra_single/extra_pair flips
   dec_*         BP guided decimation: fix the likeliest mechanism, re-run dec_iters BP iterations, repeat up to
                 dec_steps times; dec_branch first-step branches; dec_osd decimation posteriors seed OSD-CS runs
   relay_*       Relay-BP (memory-BP legs) after the normal pass: every converged leg adds a candidate, and the first
@@ -30,7 +33,8 @@ DEFAULTS = dict(schedule=1, max_iter=3, alpha=0.45, snaps=(3,), n_single=200, n_
                 relay_legs=0, relay_T0=80, relay_T=60, relay_S=5, relay_alpha=1.0, relay_osd=0,
                 relay_gmin=-0.24, relay_gmax=0.66, relay_g0=0.125,
                 n_perturb=0, perturb_scale=1.0, perturb_mode=0, perturb_single=100, perturb_pair=20,
-                dec_steps=0, dec_iters=3, dec_branch=1, dec_osd=0)
+                dec_steps=0, dec_iters=3, dec_branch=1, dec_osd=0,
+                n_triple=0, extra_bp=(), extra_single=200, extra_pair=30)
 
 
 _DEBRUIJN = np.zeros(64, np.int64)
@@ -168,7 +172,7 @@ def _reduce(v0, v1, rank, bvec, piv, bcomb):
 
 @nb.njit(cache=True)
 def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols, ncol,
-         want_cols):
+         want_cols, n_triple=0):
     """OSD-CS seeded by `order`; appends (cost, obs, hash) of every valid candidate to cc/co/ch from index nc."""
     n = order.shape[0]
     bvec = np.zeros((rank_full, 2), np.uint64)
@@ -211,7 +215,8 @@ def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pa
             n_cand += 1
     npair = min(n_pair, n_cand)
     nsing = min(n_single, n_cand)
-    nsol = max(nsing, npair)
+    ntrip = 0 if want_cols else min(n_triple, n_cand)
+    nsol = max(nsing, npair, ntrip)
     # The solve is linear over GF(2): solve(s ^ col_a ^ col_b) = solve(s) ^ solve(col_a) ^ solve(col_b). So reduce the
     # syndrome and each candidate column ONCE; every OSD-CS candidate is then two 128-bit XORs of these solutions
     # (comb = which basis columns are used; res = residual, nonzero only if H is rank deficient).
@@ -287,6 +292,34 @@ def _osd(order, s0, s1, colbits, rank_full, weight, obsmask, zob, n_single, n_pa
         co[nc] = obs
         ch[nc] = h
         nc += 1
+    # weight-3 flips: every triple a < b < c among the first ntrip candidates (three XORs each, thanks to linearity)
+    for a in range(ntrip):
+        for b in range(a + 1, ntrip):
+            for c in range(b + 1, ntrip):
+                r0 = sr0 ^ cres[a, 0] ^ cres[b, 0] ^ cres[c, 0]
+                r1 = sr1 ^ cres[a, 1] ^ cres[b, 1] ^ cres[c, 1]
+                if r0 != 0 or r1 != 0:
+                    continue
+                c0 = sc0 ^ ccmb[a, 0] ^ ccmb[b, 0] ^ ccmb[c, 0]
+                c1 = sc1 ^ ccmb[a, 1] ^ ccmb[b, 1] ^ ccmb[c, 1]
+                ja, jb, jc = cand[a], cand[b], cand[c]
+                cost = weight[ja] + weight[jb] + weight[jc]
+                obs = obsmask[ja] ^ obsmask[jb] ^ obsmask[jc]
+                h = zob[ja] ^ zob[jb] ^ zob[jc]
+                for word in range(2):
+                    x = c0 if word == 0 else c1
+                    while x != 0:
+                        low = x & (~x + np.uint64(1))
+                        k = _DEBRUIJN[(low * np.uint64(0x03F79D71B4CB0A89)) >> np.uint64(58)] + 64 * word
+                        j = sel[k]
+                        cost += weight[j]
+                        obs ^= obsmask[j]
+                        h ^= zob[j]
+                        x ^= low
+                cc[nc] = cost
+                co[nc] = obs
+                ch[nc] = h
+                nc += 1
     return nc
 
 
@@ -491,10 +524,56 @@ def _bpgd(syn, prior_llr, edge_var, chk_ptr, var_edges, var_ptr, edge_chk, max_d
 
 
 @nb.njit(cache=True)
+def _bp_flood(syn, llr, edge_var, chk_ptr, var_edges, var_ptr, iters, alpha, post, hard):
+    """Flooding min-sum BP from fresh messages on (syn, llr); fills post/hard; returns True if H hard = syn."""
+    m = chk_ptr.shape[0] - 1
+    n = llr.shape[0]
+    E = edge_var.shape[0]
+    v2c = np.empty(E)
+    c2v = np.zeros(E)
+    for e in range(E):
+        v2c[e] = llr[edge_var[e]]
+    for v in range(n):
+        post[v] = llr[v]
+    for it in range(iters):
+        for c in range(m):
+            a, b = chk_ptr[c], chk_ptr[c + 1]
+            sgn = -1.0 if syn[c] else 1.0
+            min1 = 1e300
+            min2 = 1e300
+            amin = -1
+            for e in range(a, b):
+                x = v2c[e]
+                if x < 0:
+                    sgn = -sgn
+                    x = -x
+                if x < min1:
+                    min2 = min1
+                    min1 = x
+                    amin = e
+                elif x < min2:
+                    min2 = x
+            for e in range(a, b):
+                mag = min2 if e == amin else min1
+                c2v[e] = alpha * (sgn if v2c[e] >= 0 else -sgn) * mag
+        for v in range(n):
+            tot = llr[v]
+            for k in range(var_ptr[v], var_ptr[v + 1]):
+                tot += c2v[var_edges[k]]
+            post[v] = tot
+            hard[v] = 1 if tot < 0 else 0
+            for k in range(var_ptr[v], var_ptr[v + 1]):
+                e = var_edges[k]
+                v2c[e] = tot - c2v[e]
+    return False
+
+
+@nb.njit(cache=True)
 def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob,
           rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand,
           inv_temp, gam, relay_T0, relay_T, relay_S, relay_alpha, relay_osd, pert, pert_mode, pert_single,
-          pert_pair, edge_chk, dec_steps, dec_iters, dec_branch, dec_osd, probs_out, stats_out):
+          pert_pair, edge_chk, dec_steps, dec_iters, dec_branch, dec_osd, n_triple, xbp_sched, xbp_iters, xbp_alpha,
+          xbp_single, xbp_pair, probs_out, stats_out):
     m = chk_ptr.shape[0] - 1
     n = var_ptr.shape[0] - 1
     E = edge_var.shape[0]
@@ -590,8 +669,10 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
         si += 1
 
     maxlen = rank_full + 4
-    base_c = 1 + nsnap * (1 + n_single + n_pair * (n_pair - 1) // 2)
-    per_osd = 1 + n_single + n_pair * (n_pair - 1) // 2
+    n_tri = n_triple * (n_triple - 1) * (n_triple - 2) // 6
+    base_c = 1 + nsnap * (1 + n_single + n_pair * (n_pair - 1) // 2 + n_tri)
+    per_osd = 1 + n_single + n_pair * (n_pair - 1) // 2 + n_tri
+    base_c += xbp_sched.shape[0] * (1 + xbp_single + xbp_pair * (xbp_pair - 1) // 2 + n_tri)
     base_c += gam.shape[0] + relay_osd * per_osd
     base_c += pert.shape[0] * (1 + pert_single + pert_pair * (pert_pair - 1) // 2)
     base_c += max(dec_branch, 1) * (dec_steps > 0) + dec_osd * per_osd
@@ -626,7 +707,18 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
     for s in range(nsnap):
         order = np.argsort(snap_post[s])
         nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, n_single, n_pair, cc, co, ch, nc, cols,
-                  ncol, n_expand > 0)
+                  ncol, n_expand > 0, n_triple)
+    # extra independent BP runs with other settings (schedule, iterations, alpha): each seeds its own OSD-CS run
+    if xbp_sched.shape[0] > 0:
+        xpost = np.empty(n)
+        for q in range(xbp_sched.shape[0]):
+            if xbp_sched[q] == 1:
+                _bp_layered(syn, bp_llr, edge_var, chk_ptr, max_deg, xbp_iters[q], xbp_alpha[q], xpost, hard)
+            else:
+                _bp_flood(syn, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, xbp_iters[q], xbp_alpha[q], xpost, hard)
+            order = np.argsort(xpost)
+            nc = _osd(order, s0, s1, colbits, rank_full, prior_llr, obsmask, zob, xbp_single, xbp_pair, cc, co, ch,
+                      nc, cols, ncol, n_expand > 0, n_triple)
     # randomly perturbed copies of the last BP posterior: each seeds a small OSD-CS run (more diverse candidates)
     if pert.shape[0] > 0 and nsnap > 0:
         base = snap_post[nsnap - 1]
@@ -724,7 +816,7 @@ def _shot(syn, s0, s1, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr,
 def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg, colbits, obsmask, zob, rank_full,
          schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut, tri_ptr, tri_other, n_expand, inv_temp, gam,
          relay_T0, relay_T, relay_S, relay_alpha, relay_osd, pert, pert_mode, pert_single, pert_pair, edge_chk,
-         dec_steps, dec_iters, dec_branch, dec_osd):
+         dec_steps, dec_iters, dec_branch, dec_osd, n_triple, xbp_sched, xbp_iters, xbp_alpha, xbp_single, xbp_pair):
     shots, m = dets.shape
     best = np.zeros(shots, np.uint8)
     probs = np.zeros((shots, 16))
@@ -749,7 +841,8 @@ def _run(dets, prior_llr, bp_llr, edge_var, chk_ptr, var_edges, var_ptr, max_deg
                         obsmask, zob, rank_full, schedule, max_iter, alpha, snaps, n_single, n_pair, shortcut,
                         tri_ptr, tri_other, n_expand, inv_temp, gam, relay_T0, relay_T, relay_S,
                         relay_alpha, relay_osd, pert, pert_mode, pert_single, pert_pair, edge_chk, dec_steps,
-                        dec_iters, dec_branch, dec_osd, probs[i], stats[i])
+                        dec_iters, dec_branch, dec_osd, n_triple, xbp_sched, xbp_iters, xbp_alpha, xbp_single,
+                        xbp_pair, probs[i], stats[i])
     return best, probs, stats
 
 
@@ -796,7 +889,10 @@ def decode_full(circuit, detector_events, return_stats=False, **kw):
                        o["n_expand"], 1.0 / o["temp"], _gammas(P.n, o), o["relay_T0"], o["relay_T"],
                        o["relay_S"], o["relay_alpha"], o["relay_osd"], _perturbations(P.n, o), o["perturb_mode"],
                        o["perturb_single"], o["perturb_pair"], P.edge_chk, o["dec_steps"], o["dec_iters"],
-                       o["dec_branch"], o["dec_osd"])
+                       o["dec_branch"], o["dec_osd"], o["n_triple"],
+                       np.array([x[0] for x in o["extra_bp"]], np.int64),
+                       np.array([x[1] for x in o["extra_bp"]], np.int64),
+                       np.array([x[2] for x in o["extra_bp"]], np.float64), o["extra_single"], o["extra_pair"])
     best_bits = ((best[:, None] >> np.arange(P.num_obs, dtype=np.uint8)) & 1).astype(np.uint8)
     # plain sums instead of a matmul: macOS Accelerate raises spurious warnings on subnormal probabilities
     marg = np.stack([probs[:, CLASS_BITS[:, j] == 1].sum(1) for j in range(P.num_obs)], axis=1)
