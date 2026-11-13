@@ -1,0 +1,15 @@
+[X] chunk 0 done in 12.4 s
+[X] chunk 1 done in 12.7 s
+[X] chunk 2 done in 13.5 s
+[X] chunk 3 done in 15.9 s
+[X] chunk 4 done in 18.1 s
+[X] chunk 5 done in 17.8 s
+[X] chunk 6 done in 22.7 s
+[X] chunk 7 done in 35.0 s
+[X] chunk 8 done in 36.0 s
+[X] chunk 9 done in 39.0 s
+[X] chunk 10 done in 38.9 s
+[X] chunk 11 done in 40.5 s
+[X] chunk 12 done in 40.3 s
+[X] chunk 13 done in 40.0 s
+[X] chunk 14 done in 39.4 s

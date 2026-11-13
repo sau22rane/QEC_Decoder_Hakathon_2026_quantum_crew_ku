@@ -11,3 +11,14 @@ wheels/
 
 # Kaggle upload package, rebuilt by data/make_kaggle_package.py (host_only/ holds the hidden labels)
 data/kaggle_competition/
+
+# Team: generated datasets and local submission files
+data/generated/
+submission*.csv
+!sample_submission.csv
+data/kaggle/
+# NN weights (65 MB, reproducible with team/nn/train_nn.py, not used by the hand-in)
+team/nn/*.pt
+
+# ML decoder tables, rebuilt at import by mldfast.build (hundreds of MB)
+mld_cache
