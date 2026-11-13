@@ -4,14 +4,23 @@ Every mechanism of the detector error model touches at most two adjacent time la
 probability of each logical class given the syndrome is a chain of five tables on 14-bit indices (derivation in
 mldfast.py). No BP, no OSD, no search, no training data, no randomness.
 
-Two passes, running at the same time:
+Default with a GPU (MODE = "exact"): every shot is decoded with the full, untruncated tables on the GPU
+(mlddense.run_all): no beam, no row truncation, no thresholds, so the result is the exact maximum-likelihood
+decision for every observable of every shot. Work shared between shots (identical syndromes, identical first two
+or last two layers) is done once, which changes the cost but not the result. Bits whose float32 probability lands
+within TIE of 0.5 are recomputed in float64, so the output does not depend on the GPU model.
+
+MODE = "hybrid" (MLD_MODE=hybrid) is the earlier, cheaper scheme. Two passes, running at the same time:
 1. CPU (numba, all threads): a pruned left-to-right pass on every shot (mldfast.run). It gives each observable's
    probability P(L_i = 1 | D).
 2. GPU (torch): shots with any observable within TAU of 0.5 are re-decoded with the full, untruncated tables
    (mlddense.run): three dense 16384 x 16384 products per shot, so no path can be missed. The GPU works on one chunk
    of shots while the CPU decodes the next.
 A GPU answer replaces the CPU answer unless it is a numerical tie (|P - 0.5| < TIE), so the output does not depend
-on the GPU model. Without a GPU the CPU pass alone is used, with wider limits (profile "max").
+on the GPU model.
+
+Without a GPU (or with MLD_GPU=0) the CPU pass alone is used, with the "cap" limits: light pruning sized to stay
+under t_cap on the timing machine.
 
 Import time is not timed (README, Final ranking): the tables for the two competition circuits are built or loaded
 from mld_cache/ here, moved to the GPU, and the kernels are compiled.
@@ -41,10 +50,14 @@ CACHE = os.path.join(HERE, "mld_cache")
 M = 4096        # entries kept per row of the middle table (CPU pass)
 # CPU pass (delta, kmax, eta): expand running-vector entries within a factor delta of the best one, at most kmax per
 # layer; skip row entries contributing less than eta x the layer's largest contribution.
-PROFILES = {"max": (1e-6, 512, 1e-9), "fast": (1e-4, 128, 1e-6)}
-CPU_PROFILE = os.environ.get("MLD_PROFILE", "fast" if USE_GPU else "max")
-TAU = 0.3       # GPU re-decodes shots with an observable at |P - 0.5| < TAU
-TIE = 5e-4      # ... and its answer is used unless |P - 0.5| < TIE
+# "cap" is the CPU-only default, sized to finish 2 x 100k shots under t_cap = 15.4 s on the 48-thread timing machine:
+# it takes 35.6 s on a 10-core Apple M4, which scales like 3 of its fast cores on this kernel (measured), and 48 EPYC
+# 9655 threads are estimated at 12-29 such cores, i.e. 4-10x faster, giving about 4-9 s (see FINDINGS.md).
+PROFILES = {"max": (1e-6, 512, 1e-9), "cap": (1e-5, 256, 1e-8), "fast": (1e-4, 128, 1e-6)}
+CPU_PROFILE = os.environ.get("MLD_PROFILE", "fast" if USE_GPU else "cap")
+MODE = os.environ.get("MLD_MODE", "exact")   # "exact": dense GPU pass on every shot; "hybrid": CPU pass + GPU on uncertain shots
+TAU = 0.3       # hybrid: GPU re-decodes shots with an observable at |P - 0.5| < TAU
+TIE = 5e-4      # hybrid: ... and its answer is used unless |P - 0.5| < TIE; exact: such bits are redone in float64
 CHUNK = 25_000  # shots per CPU chunk; the GPU works on chunk i while the CPU decodes chunk i + 1
 GPU_BATCH = 1024
 _TABLES, _DENSE = {}, {}
@@ -60,9 +73,14 @@ def _tables(circuit):
 
 def _dense(circuit, key, tb):
     if key not in _DENSE:
-        if DEVICE.type != "cuda":  # small-memory GPUs (Apple MPS): keep one basis at a time
+        big = DEVICE.type == "cuda" and mlddense.torch.cuda.get_device_properties(0).total_memory > 40 * 2 ** 30
+        if not big:  # GPUs under 40 GB (T4, Apple MPS): keep one basis at a time
             _DENSE.clear()
-        _DENSE[key] = mlddense.load(tb, mldfast.build_dense(circuit, CACHE), DEVICE)
+            if DEVICE.type == "cuda":
+                mlddense.torch.cuda.empty_cache()
+        N = mldfast.build_dense(circuit, CACHE)
+        _DENSE[key] = mlddense.load(tb, N, DEVICE)
+        _DENSE[key]["Nnp"] = N
     return _DENSE[key]
 
 
@@ -95,6 +113,22 @@ def decode(circuit: stim.Circuit, detector_events: np.ndarray) -> np.ndarray:
         return pred
     dt = _dense(circuit, key, tb)
     st["load_seconds"] = time.perf_counter() - t_start
+    if MODE == "exact":
+        st["mode"] = "exact"
+        t0 = time.perf_counter()
+        pchi, shared = mlddense.run_all(dt, dets, GPU_BATCH)
+        st.update(shared, gpu_seconds=time.perf_counter() - t0, gpu_shots=len(dets))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p1 = 0.5 * (1.0 - pchi[:, 1:] / pchi[:, :1])
+        ties = np.flatnonzero(~(np.abs(p1 - 0.5).min(1) >= TIE))  # also catches non-finite values
+        if len(ties):
+            t0 = time.perf_counter()
+            pchi[ties] = mlddense.run64(dt, dt["Nnp"], dets[ties])
+            st["tie_seconds"] = time.perf_counter() - t0
+        st["gpu_ties"] = len(ties)
+        pred[:] = pchi[:, 1:] < 0
+        st["total_seconds"] = time.perf_counter() - t_start
+        return pred
     jobs = queue.Queue()
     errors = []
 

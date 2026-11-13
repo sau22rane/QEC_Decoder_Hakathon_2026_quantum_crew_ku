@@ -542,6 +542,63 @@ Files: `submission_ml/mlddense.py` (PyTorch), `submission_ml/decoder.py`, check 
   `decoder.py` sets `NUMBA_THREADING_LAYER=workqueue` before importing numba. Only one Python thread may call the
   numba kernel with that layer.
 
+## ML decoder, final shape (21:15–21:50): exact on the GPU, lightly pruned on the CPU
+
+`submission_ml/decoder.py` now has two paths.
+
+**With a GPU (`MODE = "exact"`, default): no pruning at all.** Every shot is decoded with the full tables
+(`mlddense.run_all`): no beam, no row truncation, no thresholds. Shared work is done once, which changes the cost but
+not the sums:
+- identical syndromes are decoded once (20,000 validation shots hold 16,945 distinct syndromes);
+- the left part of the chain depends only on (D0, D1) and the right part only on (D4, D5): 4,214 and 4,541 distinct
+  pairs in those 20,000 shots, so each shot needs one dense product, not three;
+- bits whose float32 probability is within 5e-4 of 0.5 are recomputed in float64 (5 shots in 20,000). Float32 and
+  float64 agree to 1e-5 in P.
+- It reproduces the earlier dense pass bit for bit (0 of 8,192 bits differ) at 2.2× the speed: 462 shots/s on the
+  Apple GPU.
+
+**Without a GPU (`MLD_GPU=0`): profile `cap`, delta 1e-5 / kmax 256 / eta 1e-8**, sized for t_cap on 48 threads:
+- Thread scaling of the kernel on the 10-core M4 (4 fast + 6 slow cores), 20k shots: 1 thread 4.39 s, 2: 2.48 s,
+  4: 1.97 s, 6: 1.68 s, 8: 1.46 s, 10: 1.52 s. So the whole Mac is worth about 3 of its fast cores.
+- An EPYC 9655 thread is taken as 0.6 of an M4 fast core. 48 vCPUs are then 12 fast-core equivalents if they are 24
+  cores with hyperthreads at 70% parallel efficiency, and 29 if they are 48 full cores: 4× to 10× this Mac.
+- `cap` takes 38.3 s here (median of 3 in `run_local.py`), so an estimated 4–10 s on the timing machine. The next
+  step up (1e-5 / 384 / 3e-9, 62.5 s here) would be 6–16 s, which can exceed the cap.
+
+| CPU pruning (delta / kmax / eta), `data/train` 2×100k | LER | Seconds on the M4 |
+|---|---|---|
+| 1e-4 / 128 / 1e-6 (`fast`) | 0.03389 | 7.5 |
+| 1e-4 / 128 / 1e-7 | 0.03388 | 13.2 |
+| 1e-5 / 256 / 1e-7 | 0.03388 | 16.5 |
+| **1e-5 / 256 / 1e-8 (`cap`)** | **0.03387** | 35.6 (38.3 in `run_local.py`) |
+| 1e-5 / 384 / 3e-9 | 0.03387 | 62.5 |
+| 1e-6 / 512 / 1e-9 (`max`) | 0.03386 | 104.2 |
+
+| Path, `data/train` 2×100k | LER | Seconds on the M4 |
+|---|---|---|
+| CPU only, `cap` | 0.03387 (X 0.03429, Z 0.03345) | 38.3 |
+| GPU exact, every shot | **0.03385** (X 0.03430, Z 0.03340) | 645.53 (Apple GPU; T4 and B200 not measured) |
+
+Test-set files (`data/test`, not submitted): `submission_test_ml_exact.csv` (570 s on the Mac) and
+`submission_test_ml_cap.csv`. Bits differing out of 800,000: exact vs `cap` 203, exact vs the submitted `max` file 124, `cap` vs `max` 99; on `data/train`, exact vs `cap` 194.
+`submission_ml/reference_test_pred_mps.npy` holds the exact-mode test predictions from the Apple GPU, for the
+bit-for-bit comparison in the Kaggle T4 notebook.
+
+## Hand-in (22:20): `final_submission/` on branch `final-submission`
+
+- **Selected submission:** exact mode, `submission_test_ml_exact.csv`, Kaggle ref 58321275, public score 0.03368
+  (the pruned `max` file, ref 58318168, scored 0.03367; the two differ in 124 of 800,000 bits).
+- **Folder:** `decoder.py`, `mldfast.py`, `mlddense.py`, the two circuits, `requirements.txt`, the organisers'
+  `run_local.py` and a README. The tables are rebuilt from the circuits on first import (14 GB in `mld_cache/`).
+- **Check:** `run_local.py --decoder final_submission --problem-set data/test --shots 4000` reproduces the
+  submitted file bit for bit on those 8,000 shots, and is deterministic over two runs.
+- **Kaggle T4 run of the earlier hybrid version** (branch `dev/kaggle-t4-output`): LER 0.03385 on `data/train`,
+  56.1 s for 200k shots on a T4 with 4 CPU cores, 1 test bit differing from the Apple GPU. Kaggle's numpy 2.1.3
+  dropped 3 of 200,000 CSV rows; the pinned 2.5.4 doesn't. The metrics cell failed on an import (fixed since).
+- **Timing estimate, exact mode** (not measured on CUDA): 5.4e14 floating-point operations for 2×100k shots, so
+  4.5–9 s on a B200 at 60–120 TFLOPS in float32, 13.4 s at 40 TFLOPS, plus 1–2 s of CPU preparation.
+- **CLI gotcha:** `kaggle auth login` reported "already logged-in" while API calls failed; `--force` fixed it.
+
 ## What to try next (ranked)
 
 1. **Train the NN much longer, on the GPU.**

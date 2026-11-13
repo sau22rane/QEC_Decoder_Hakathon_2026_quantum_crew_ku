@@ -21,4 +21,4 @@ data/kaggle/
 team/nn/*.pt
 
 # ML decoder tables, rebuilt at import by mldfast.build (hundreds of MB)
-mld_cache/
+mld_cache
